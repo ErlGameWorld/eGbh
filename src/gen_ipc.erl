@@ -1835,25 +1835,25 @@ list_timeouts(Timers) ->
 %% 状态转换已完成，如果有排队事件，则继续循环，否则获取新事件
 performEvents(CycleData, CurStatus, CurState, Debug, LeftEvents, IsHibernate, DoAfter) ->
 %    io:format("loop_done: status_data = ~p ~n postponed = ~p  LeftEvents = ~p ~n timers = ~p.~n", [S#status.status_data,,S#status.postponed,LeftEvents,S#status.timers]),
-   case LeftEvents of
-      [] ->
-         case DoAfter of
-            {true, Args} ->
-               %% 这里 IsHibernate设置会被丢弃 按照gen_server中的设计 continue 和 hiernate是互斥的
-               startAfterCall(CycleData, CurStatus, CurState, Debug, LeftEvents, Args);
-            _ ->
-               reLoopEntry(CycleData, CurStatus, CurState, Debug, IsHibernate)
-         end;
-      [Event | _Events] ->
-         %% 循环直到没有排队事件
-         if
-            IsHibernate ->
-               %% _ = garbage_collect(),
-               erts_internal:garbage_collect(major);
-            true ->
-               ignore
-         end,
-         startEventCall(CycleData, CurStatus, CurState, Debug, LeftEvents, Event)
+   case DoAfter of
+      {true, Args} ->
+         %% 这里 IsHibernate设置会被丢弃 按照gen_server中的设计 continue 和 hiernate是互斥的
+         startAfterCall(CycleData, CurStatus, CurState, Debug, LeftEvents, Args);
+      _ ->
+         case LeftEvents of
+            [] ->
+               reLoopEntry(CycleData, CurStatus, CurState, Debug, IsHibernate);
+            [Event | _Events] ->
+               %% 循环直到没有排队事件
+               if
+                  IsHibernate ->
+                     %% _ = garbage_collect(),
+                     erts_internal:garbage_collect(major);
+                  true ->
+                     ignore
+               end,
+               startEventCall(CycleData, CurStatus, CurState, Debug, LeftEvents, Event)
+         end
    end.
 
 doReplies([], Debug) ->
