@@ -60,7 +60,7 @@
       ?NOT_DEBUG ->
          Debug;
       _ ->
-         sys_debug(Debug, getProName(), SystemEvent)
+         sys:handle_debug(Debug, fun print_event/3, getProName(), SystemEvent)
    end).
 
 %%%==========================================================================
@@ -69,7 +69,7 @@
 %% gen:call 发送消息来源进程格式类型
 -type from() :: {To :: pid(), Tag :: term()}.
 
-%% 事情类型
+%% 事件类型
 -type eventType() :: externalEventType() | timeoutEventType() | {'onevent', Subtype :: term()}.
 -type externalEventType() :: {'call', From :: from()} | 'cast' | 'info'.
 -type timeoutEventType() :: 'eTimeout' | 'sTimeout' | {'gTimeout', Name :: term()}.
@@ -93,15 +93,15 @@
 %% 在状态更改期间:
 %% NextStatus and NewData are set.
 %% 按照出现的顺序处理 actions()列表
-%% 这些action（）按包含列表中的出现顺序执行。设置选项的选项将覆盖任何以前的选项，因此每种类型的最后一种将获胜。
+%% 这些action() 按包含列表中的出现顺序执行。设置选项的选项将覆盖任何以前的选项，因此每种类型的最后一种将获胜。
 %% 如果设置了enter 则进入enter回调
+%% 如果设置了doAfter 则进入after回调
 %% 如果 "postpone" 为 "true"，则推迟当前事件。
 %% 如果设置了“超时”，则开始状态超时。 零超时事件将会插入到待处理事件的前面 先执行
 %% 如果有postponed 事件则 事件执行顺序为 超时添加和更新 + 零超时 + 当前事件 + 反序的Postpone事件 + LeftEvent
-%% 如果设置doAfter 则进入after回调
 %% 处理待处理的事件，或者如果没有待处理的事件，则服务器进入接收或休眠状态（当“hibernate”为“ true”时）
 -type initAction() ::
-{trap_exit, Bool :: isTrapExit()} |                                      % 设置是否捕捉信息 主要用于gen_event模式下
+   {trap_exit, Bool :: isTrapExit()} |                                      % 设置是否捕捉信息 主要用于gen_event模式下
    eventAction().
 
 -type eventAction() ::
@@ -151,38 +151,38 @@
    {'reply', From :: from(), Reply :: term()}.
 
 -type eventCallbackResult() ::
-   {'reply', Reply :: term(), NewState :: term()} |                                                % 用作gen_server模式时快速响应进入消息接收
-   {'noreply', NewState :: term()} |                                                               % 用作gen_server模式时快速响应进入消息接收
-   {'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |        % 用作gen_server模式时快速响应进入消息接收
-   {'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                       % 用作gen_server模式时快速响应进入循环
-   {'nextStatus', NextStatus :: term(), NewState :: term()} |                                      % {next_status,NextStatus,NewData,[]}
-   {'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |     % Status transition, maybe to the same status
+   {'reply', Reply :: term(), NewState :: term()} |                                                                    % 用作gen_server模式时快速响应进入消息接收
+   {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
+   {'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |                            % 用作gen_server模式时快速响应进入消息接收
+   {'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                                           % 用作gen_server模式时快速响应进入循环
+   {'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
+   {'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |                         % Status transition, maybe to the same status
    commonCallbackResult(eventAction()).
 
 -type afterCallbackResult() ::
-   {'nextStatus', NextStatus :: term(), NewState :: term()} |                                      % {next_status,NextStatus,NewData,[]}
-   {'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [afterAction(), ...]} |     % Status transition, maybe to the same status
-   {'noreply', NewState :: term()} |                                                               % 用作gen_server模式时快速响应进入消息接收
-   {'noreply', NewState :: term(), Options :: hibernate} |                                         % 用作gen_server模式时快速响应进入消息接收
+   {'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
+   {'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [afterAction(), ...]} |                         % Status transition, maybe to the same status
+   {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
+   {'noreply', NewState :: term(), Options :: hibernate} |                                                             % 用作gen_server模式时快速响应进入消息接收
    commonCallbackResult(afterAction()).
 
 -type enterCallbackResult() ::
    commonCallbackResult(enterAction()).
 
 -type commonCallbackResult(ActionType) ::
-   {'keepStatus', NewState :: term()} |                                                            % {keep_status,NewData,[]}
-   {'keepStatus', NewState :: term(), Actions :: [ActionType]} |                                   % Keep status, change data
-   'keepStatusState' |                                                                             % {keep_status_and_data,[]}
-   {'keepStatusState', Actions :: [ActionType]} |                                                  % Keep status and data -> only actions
-   {'repeatStatus', NewState :: term()} |                                                          % {repeat_status,NewData,[]}
-   {'repeatStatus', NewState :: term(), Actions :: [ActionType]} |                                 % Repeat status, change data
-   'repeatStatusState' |                                                                           % {repeat_status_and_data,[]}
-   {'repeatStatusState', Actions :: [ActionType]} |                                                % Repeat status and data -> only actions
-   'stop' |                                                                                        % {stop,normal}
-   {'stop', Reason :: term()} |                                                                    % Stop the server
-   {'stop', Reason :: term(), NewState :: term()} |                                                % Stop the server
-   {'stopReply', Reason :: term(), Replies :: [replyAction(), ...]} |                              % Reply then stop the server
-   {'stopReply', Reason :: term(), Replies :: [replyAction(), ...], NewState :: term()}.           % Reply then stop the server
+   {'keepStatus', NewState :: term()} |                                                                                % {keep_status,NewData,[]}
+   {'keepStatus', NewState :: term(), Actions :: [ActionType]} |                                                       % Keep status, change data
+   'keepStatusState' |                                                                                                 % {keep_status_and_data,[]}
+   {'keepStatusState', Actions :: [ActionType]} |                                                                      % Keep status and data -> only actions
+   {'repeatStatus', NewState :: term()} |                                                                              % {repeat_status,NewData,[]}
+   {'repeatStatus', NewState :: term(), Actions :: [ActionType]} |                                                     % Repeat status, change data
+   'repeatStatusState' |                                                                                               % {repeat_status_and_data,[]}
+   {'repeatStatusState', Actions :: [ActionType]} |                                                                    % Repeat status and data -> only actions
+   'stop' |                                                                                                            % {stop,normal}
+   {'stop', Reason :: term()} |                                                                                        % Stop the server
+   {'stop', Reason :: term(), NewState :: term()} |                                                                    % Stop the server
+   {'stopReply', Reason :: term(), Replies :: [replyAction(), ...]} |                                                  % Reply then stop the server
+   {'stopReply', Reason :: term(), Replies :: [replyAction(), ...], NewState :: term()}.                               % Reply then stop the server
 
 %% 状态机的初始化功能函数
 %% 如果要模拟gen_server init返回定时时间 可以在Actions返回定时动作
@@ -200,8 +200,7 @@
 
 %% 当 init返回actions包含 doAfter 的时候会在 enter调用后 调用该函数 或者
 %% 在事件回调函数返回后 enter调用后调用该函数
-%% 可以用作二次初始化
-%% 该回调函数相当于 gen_server 的 handle_continue回调 但是在综合模式时 也可以生效 TODO 需要弄清楚参数设置和重置的时间
+%% 该回调函数相当于 gen_server 的 handle_continue回调 但是在综合模式时 也可以生效
 -callback handleAfter(AfterArgs :: term(), Status :: term(), State :: term()) ->
    afterCallbackResult().
 
@@ -217,7 +216,7 @@
 -callback handleInfo(EventContent :: term(), Status :: term(), State :: term()) ->
    eventCallbackResult().
 
-%% 内部事件 Onevent 包括actions 设置的定时器超时产生的事件 和 nextEvent产生的超时事件 但是不是 call cast info 回调函数 以及其他自定义定时事件
+%% 内部事件 Onevent 包括actions 设置的定时器超时产生的事件 和 nextEvent产生的超时事件 但是不是 call cast info 回调函数 以及其他自定义定时事件 的回调函数
 %% 并且这里需要注意 其他erlang:start_timer生成超时事件发送的消息 不能和gen_ipc定时器关键字重合 有可能会导致一些问题
 -callback handleOnevent(EventType :: term(), EventContent :: term(), Status :: term(), State :: term()) ->
    eventCallbackResult().
@@ -225,7 +224,7 @@
 %% 在gen_event模式下 扩展了下面三个回调函数 考虑场景是：
 %% 比如游戏里的公会 有时候一个公会一个进程来管理可能开销比较高 只用一个进程来管理所以公会有可能一个进程处理不过来
 %% 这个时候可以考虑用gen_ipc来分组管理 一个gen_ipc进程管理 N 个公会 但是管理进程需要做一些数据保存什么 或者定时 就可能会用到下面的这些函数
-%% gen_event模式时 noticy 有可能需要回调该管理进程的该函数
+%% gen_event模式时 notify 有可能需要回调该管理进程的该函数
 -callback handleEpmEvent(EventContent :: term(), Status :: term(), State :: term()) ->
    eventCallbackResult().
 
@@ -347,6 +346,7 @@ stop(ServerRef) ->
 stop(ServerRef, Reason, Timeout) ->
    gen:stop(ServerRef, Reason, Timeout).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% start stop API end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 doModuleInit(Module, Args) ->
    try
@@ -383,13 +383,13 @@ init_it(Starter, Parent, ServerRef, Module, Args, Opts) ->
       {'EXIT', Class, Reason, Stacktrace} ->
          gen:unregister_name(ServerRef),
          proc_lib:init_ack(Starter, {error, Reason}),
-         error_info(Class, Reason, Stacktrace, #cycleData{module = Module}, un_init, un_init, Debug, []),
+         error_info(Class, Reason, Stacktrace, #cycleData{module = Module}, 'Sun_init', '$un_init', Debug, []),
          erlang:raise(Class, Reason, Stacktrace);
       _Ret ->
          gen:unregister_name(ServerRef),
          Error = {badReturnFrom_doModuleInit, _Ret},
          proc_lib:init_ack(Starter, {error, Error}),
-         error_info(error, Error, ?STACKTRACE(), #cycleData{module = Module}, un_init, un_init, Debug, []),
+         error_info(error, Error, ?STACKTRACE(), #cycleData{module = Module}, '$un_init', '$un_init', Debug, []),
          exit(Error)
    end.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen callbacks end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -408,10 +408,10 @@ enter_loop(Module, Status, State, Opts, ServerOrActions) ->
    end.
 
 -spec enter_loop(Module :: module(), Status :: term(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), Actions :: [eventAction()]) -> no_return().
-enter_loop(Module, Status, State, Opts, Server, Actions) ->
+enter_loop(Module, Status, State, Opts, ServerName, Actions) ->
    is_atom(Module) orelse error({atom, Module}),
    Parent = gen:get_parent(),
-   Name = gen:get_proc_name(Server),
+   Name = gen:get_proc_name(ServerName),
    Debug = gen:debug_options(Name, Opts),
    HibernateAfterTimeout = gen:hibernate_after(Opts),
    loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, Status, State, Actions).
@@ -1923,7 +1923,7 @@ error_info(Class, Reason, Stacktrace, #cycleData{isEnter = IsEnter, postponed = 
       #{
          domain => [otp],
          report_cb => fun gen_ipc:format_log/1,
-         error_logger => #{tag=>error}}
+         error_logger => #{tag => error}}
    ).
 
 clientStacktrace([]) ->
@@ -1931,16 +1931,12 @@ clientStacktrace([]) ->
 clientStacktrace([{{call, {Pid, _Tag}}, _Req} | _]) when is_pid(Pid) ->
    if
       node(Pid) =:= node() ->
-         case
-            process_info(Pid, [current_stacktrace, registered_name])
-         of
+         case process_info(Pid, [current_stacktrace, registered_name]) of
             undefined ->
                {Pid, dead};
-            [{current_stacktrace, Stacktrace},
-               {registered_name, []}] ->
+            [{current_stacktrace, Stacktrace}, {registered_name, []}] ->
                {Pid, {Pid, Stacktrace}};
-            [{current_stacktrace, Stacktrace},
-               {registered_name, Name}] ->
+            [{current_stacktrace, Stacktrace}, {registered_name, Name}] ->
                {Pid, {Name, Stacktrace}}
          end;
       true ->
@@ -2089,11 +2085,7 @@ format_status_default(Opt, Status_State) ->
 %%---------------------------------------------------------------------------
 %% Format debug messages.  Print them as the call-back module sees
 %% them, not as the real erlang messages.  Use trace for that.
-%%---------------------------------------------------------------------------
-
--compile({inline, [sys_debug/3]}).
-sys_debug(Debug, NameStatus, Entry) ->
-   sys:handle_debug(Debug, fun print_event/3, NameStatus, Entry).
+%%--------------------------------------------------------------------------
 
 print_event(Dev, SystemEvent, Name) ->
    case SystemEvent of
