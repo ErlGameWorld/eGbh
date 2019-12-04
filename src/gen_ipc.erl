@@ -420,7 +420,6 @@ enter_loop(Module, Status, State, Opts, ServerName, Actions) ->
 loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, CurStatus, CurState, Actions) ->
    setParent(Parent),
    setProName(Name),
-
    %% 如果该进程用于 gen_event 则需要设置  process_flag(trap_exit, true) 需要在Actions返回 {trap_exit, true}
    MewActions =
       case lists:keyfind(trap_exit, 1, Actions) of
@@ -1505,7 +1504,7 @@ parseEventActionsList(CycleData, CurStatus, CurState, NewStatus, Debug, LeftEven
          terminate(error, ErrorContent, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, []);
       {NewCycleData, NewDebug, NewIsPostpone, NewIsHibernate, MewDoAfter, NewTimeouts, NewNextEvents} ->
          case IsCallEnter andalso element(#cycleData.isEnter, NewCycleData) of
-            true when IsCallEnter ->
+            true ->
                startEnterCall(NewCycleData, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NewNextEvents, NewIsPostpone, NewIsHibernate, MewDoAfter);
             _ ->
                performTransitions(NewCycleData, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NewNextEvents, NewIsPostpone, NewIsHibernate, MewDoAfter)
@@ -1554,7 +1553,13 @@ loopParseActionsList([OneAction | LeftActions], CallbackForm, CycleData, Debug, 
       {c_gTimeout, _Name} = CGNewTV ->
          loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [CGNewTV | Timeouts], NextEvents);
       {isEnter, IsEnter} when is_boolean(IsEnter) ->
-         NewCycleData = setelement(#cycleData.isEnter, CycleData, IsEnter),
+         NewCycleData =
+            case element(#cycleData.isEnter, CycleData) of
+               IsEnter ->
+                  CycleData;
+               _ ->
+                  setelement(#cycleData.isEnter, CycleData, IsEnter)
+         end,
          loopParseActionsList(LeftActions, CallbackForm, NewCycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
       {isHibernate, NewIsHibernate} when is_boolean(NewIsHibernate) ->
          loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, NewIsHibernate, DoAfter, Timeouts, NextEvents);
@@ -1596,20 +1601,14 @@ checkTimeOptions({TimeoutType, Time, TimeoutMsg, Options} = NewTV) ->
 %% 进行状态转换
 performTransitions(#cycleData{postponed = Postponed, timers = Timers} = CycleData, CurStatus, CurState, NewStatus, Debug, [Event | LeftEvents], Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter) ->
    %% 已收集所有选项，并缓冲next_events。执行实际状态转换。如果推迟则将当前事件移至推迟
-   %% 此时 Timeouts, NextEvents的顺序与最开始出现的顺序相反 后面执行的顺序 超时添加和更新 + 零超时 + 当前事件 + 反序的Postpone事件 + LeftEvent  %% TODO 测试验证
-   NewDebug =
-      if
-         IsPostpone ->
-            ?SYS_DEBUG(Debug, {postpone, Event, CurStatus, NewStatus});
-         true ->
-            ?SYS_DEBUG(Debug, {consume, Event, NewStatus, NewStatus})
-      end,
+   %% 此时 Timeouts, NextEvents的顺序与最开始出现的顺序相反. 后面执行的顺序 超时添加和更新 + 零超时 + 当前事件 + 反序的Postpone事件 + LeftEvent  %% TODO 测试验证
+   NewDebug = ?SYS_DEBUG(Debug, case IsPostpone of true -> {postpone, Event, CurStatus, NewStatus}; _ -> {consume, Event, NewStatus, NewStatus} end),
    if
       CurStatus =:= NewStatus ->
          %% Cancel event timeout
          LastTimers =
-            case maps:get(eTimeout, Timers) of
-               {TimerRef, _TimeoutMsg} ->
+            case Timers of
+               #{eTimeout := {TimerRef, _TimeoutMsg}} ->
                   cancelTimer(eTimeout, TimerRef, Timers);
                _ ->
                   Timers
@@ -1617,25 +1616,25 @@ performTransitions(#cycleData{postponed = Postponed, timers = Timers} = CycleDat
          if
             IsPostpone ->
                NewCycleData = setelement(#cycleData.postponed, CycleData, [Event | Postponed]),
-               performTimeouts(NewCycleData, CurStatus, CurState, NewDebug, LeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter);
+               performTimeouts(NewCycleData, NewStatus, CurState, NewDebug, LeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter);
             true ->
-               performTimeouts(CycleData, CurStatus, CurState, NewDebug, LeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter)
+               performTimeouts(CycleData, NewStatus, CurState, NewDebug, LeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter)
          end;
       true ->
          %% 取消 status and event timeout
          LastTimers =
-            case maps:get(sTimeout, Timers) of
-               {STimerRef, _STimeoutMsg} ->
+            case Timers of
+               #{sTimeout := {STimerRef, _STimeoutMsg}} ->
                   TemTimer = cancelTimer(sTimeout, STimerRef, Timers),
-                  case maps:get(eTimeout, TemTimer) of
-                     {ETimerRef, _ETimeoutMsg} ->
+                  case TemTimer of
+                     #{eTimeout := {ETimerRef, _ETimeoutMsg}} ->
                         cancelTimer(eTimeout, ETimerRef, TemTimer);
                      _ ->
                         TemTimer
                   end;
                _ ->
-                  case maps:get(eTimeout, Timers) of
-                     {ETimerRef, _ETimeoutMsg} ->
+                  case Timers of
+                     #{eTimeout := {ETimerRef, _ETimeoutMsg}} ->
                         cancelTimer(eTimeout, ETimerRef, Timers);
                      _ ->
                         Timers
@@ -1703,19 +1702,19 @@ performTimeouts(#cycleData{timers = OldTimer} = CycleData, CurStatus, CurState, 
             [] ->
                case OldTimer =:= NewTimers of
                   true ->
-                     performEvents(CycleData, CurStatus, CurState, Debug, TemLastEvents, IsHibernate, DoAfter);
+                     performEvents(CycleData, CurStatus, CurState, NewDebug, TemLastEvents, IsHibernate, DoAfter);
                   _ ->
                      NewCycleData = setelement(#cycleData.timers, CycleData, NewTimers),
-                     performEvents(NewCycleData, CurStatus, CurState, Debug, TemLastEvents, IsHibernate, DoAfter)
+                     performEvents(NewCycleData, CurStatus, CurState, NewDebug, TemLastEvents, IsHibernate, DoAfter)
                end;
             _ ->
-               {LastEvents, NewDebug} = mergeTimeoutEvents(TimeoutEvents, CurStatus, Debug, TemLastEvents),
+               {LastEvents, LastDebug} = mergeTimeoutEvents(TimeoutEvents, CurStatus, NewDebug, TemLastEvents),
                case OldTimer =:= NewTimers of
                   true ->
-                     performEvents(CycleData, CurStatus, CurState, Debug, LastEvents, IsHibernate, DoAfter);
+                     performEvents(CycleData, CurStatus, CurState, LastDebug, LastEvents, IsHibernate, DoAfter);
                   _ ->
                      NewCycleData = setelement(#cycleData.timers, CycleData, NewTimers),
-                     performEvents(NewCycleData, CurStatus, CurState, Debug, LastEvents, IsHibernate, DoAfter)
+                     performEvents(NewCycleData, CurStatus, CurState, LastDebug, LastEvents, IsHibernate, DoAfter)
                end
          end
    end.
@@ -1761,25 +1760,25 @@ loopTimeoutsList([OneTimeout | LeftTimeouts], Timers, TimeoutEvents, Debug) ->
    end.
 
 doRegisterTimer(TimeoutType, NewTimerRef, TimeoutMsg, Timers) ->
-   case maps:get(TimeoutType, Timers) of
-      {OldTimerRef, _OldTimeMsg} ->
+   case Timers of
+      #{TimeoutType := {OldTimerRef, _OldTimeMsg}} ->
          TemTimers = cancelTimer(TimeoutType, OldTimerRef, Timers),
-         TemTimers#{TimeoutType := {NewTimerRef, TimeoutMsg}};
+         TemTimers#{TimeoutType => {NewTimerRef, TimeoutMsg}};
       _ ->
-         Timers#{TimeoutType := {NewTimerRef, TimeoutMsg}}
+         Timers#{TimeoutType => {NewTimerRef, TimeoutMsg}}
    end.
 
 doCancelTimer(TimeoutType, Timers) ->
-   case maps:get(TimeoutType, Timers) of
-      {TimerRef, _TimeoutMsg} ->
+   case Timers of
+      #{TimeoutType := {TimerRef, _TimeoutMsg}} ->
          cancelTimer(TimeoutType, TimerRef, Timers);
       _ ->
          Timers
    end.
 
 doUpdateTimer(TimeoutType, Timers, TimeoutMsg) ->
-   case maps:get(TimeoutType, Timers) of
-      {TimerRef, _OldTimeoutMsg} ->
+   case Timers of
+      #{TimeoutType := {TimerRef, _OldTimeoutMsg}} ->
          Timers#{TimeoutType := {TimerRef, TimeoutMsg}};
       _ ->
          Timers
@@ -1812,7 +1811,7 @@ cancelTimer(TimeoutType, TimerRef, Timers) ->
 mergeTimeoutEvents([], _Status, Debug, Events) ->
    {Events, Debug};
 mergeTimeoutEvents([{eTimeout, _} = TimeoutEvent | TimeoutEvents], Status, Debug, []) ->
-   %% 由于队列中没有其他事件，因此请添加此前缀
+   %% 由于队列中没有其他事件，因此添加该事件零超时事件
    NewDebug = ?SYS_DEBUG(Debug, {insert_timeout, TimeoutEvent, Status}),
    mergeTimeoutEvents(TimeoutEvents, Status, NewDebug, [TimeoutEvent]);
 mergeTimeoutEvents([{eTimeout, _} | TimeoutEvents], Status, Debug, Events) ->
@@ -1834,7 +1833,7 @@ list_timeouts(Timers) ->
 
 %% 状态转换已完成，如果有排队事件，则继续循环，否则获取新事件
 performEvents(CycleData, CurStatus, CurState, Debug, LeftEvents, IsHibernate, DoAfter) ->
-%    io:format("loop_done: status_data = ~p ~n postponed = ~p  LeftEvents = ~p ~n timers = ~p.~n", [S#status.status_data,,S#status.postponed,LeftEvents,S#status.timers]),
+%  io:format("loop_done: status_data = ~p ~n postponed = ~p  LeftEvents = ~p ~n timers = ~p.~n", [S#status.status_data,,S#status.postponed,LeftEvents,S#status.timers]),
    case DoAfter of
       {true, Args} ->
          %% 这里 IsHibernate设置会被丢弃 按照gen_server中的设计 continue 和 hiernate是互斥的
