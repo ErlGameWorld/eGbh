@@ -1301,7 +1301,7 @@ startEventCall(#cycleData{module = Module} = CycleData, CurStatus, CurState, Deb
                terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, Debug, LeftEvents)
          end;
       _ ->
-         try Module:handleOnevent(Content, CurStatus, CurState) of
+         try Module:handleOnevent(Type, Content, CurStatus, CurState) of
             Result ->
                handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
          catch
