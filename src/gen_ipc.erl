@@ -1553,14 +1553,13 @@ loopParseActionsList([OneAction | LeftActions], CallbackForm, CycleData, Debug, 
       {c_gTimeout, _Name} = CGNewTV ->
          loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [CGNewTV | Timeouts], NextEvents);
       {isEnter, IsEnter} when is_boolean(IsEnter) ->
-         NewCycleData =
             case element(#cycleData.isEnter, CycleData) of
                IsEnter ->
-                  CycleData;
+                  loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
                _ ->
-                  setelement(#cycleData.isEnter, CycleData, IsEnter)
-         end,
-         loopParseActionsList(LeftActions, CallbackForm, NewCycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
+                  NewCycleData = setelement(#cycleData.isEnter, CycleData, IsEnter),
+                  loopParseActionsList(LeftActions, CallbackForm, NewCycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents)
+         end;
       {isHibernate, NewIsHibernate} when is_boolean(NewIsHibernate) ->
          loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, NewIsHibernate, DoAfter, Timeouts, NextEvents);
       {isPostpone, NewIsPostpone} when is_boolean(NewIsPostpone) andalso (not NewIsPostpone orelse CallbackForm == ?CB_FORM_EVENT) ->
