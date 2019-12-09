@@ -181,8 +181,8 @@
    'stop' |                                                                                                            % {stop,normal}
    {'stop', Reason :: term()} |                                                                                        % Stop the server
    {'stop', Reason :: term(), NewState :: term()} |                                                                    % Stop the server
-   {'stopReply', Reason :: term(), Replies :: [replyAction(), ...]} |                                                  % Reply then stop the server
-   {'stopReply', Reason :: term(), Replies :: [replyAction(), ...], NewState :: term()}.                               % Reply then stop the server
+   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...]} |                                                  % Reply then stop the server
+   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...], NewState :: term()}.                               % Reply then stop the server
 
 %% 状态机的初始化功能函数
 %% 如果要模拟gen_server init返回定时时间 可以在Actions返回定时动作
@@ -1079,7 +1079,12 @@ epmStopOne(ExitEmpSup) ->
 %% 仅在＃params.parent不同时更新。今天，这应该是不可能的（OTP-22.0），但是，例如，如果有人在新的sys调用中实现了更改服务器父服务器，则可能发生这种情况。
 -compile({inline, updateParent/1}).
 updateParent(Parent) ->
-   setProName(Parent).
+   case getParent() of
+      Parent ->
+         ignore;
+      _ ->
+         setParent(Parent)
+   end.
 %%%==========================================================================
 %%% Internal callbacks
 wakeup_from_hibernate(CycleData, CurStatus, CurState, Debug, IsHibernate) ->
@@ -1553,12 +1558,12 @@ loopParseActionsList([OneAction | LeftActions], CallbackForm, CycleData, Debug, 
       {c_gTimeout, _Name} = CGNewTV ->
          loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [CGNewTV | Timeouts], NextEvents);
       {isEnter, IsEnter} when is_boolean(IsEnter) ->
-            case element(#cycleData.isEnter, CycleData) of
-               IsEnter ->
-                  loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
-               _ ->
-                  NewCycleData = setelement(#cycleData.isEnter, CycleData, IsEnter),
-                  loopParseActionsList(LeftActions, CallbackForm, NewCycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents)
+         case element(#cycleData.isEnter, CycleData) of
+            IsEnter ->
+               loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
+            _ ->
+               NewCycleData = setelement(#cycleData.isEnter, CycleData, IsEnter),
+               loopParseActionsList(LeftActions, CallbackForm, NewCycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents)
          end;
       {isHibernate, NewIsHibernate} when is_boolean(NewIsHibernate) ->
          loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, NewIsHibernate, DoAfter, Timeouts, NextEvents);
@@ -1854,21 +1859,17 @@ performEvents(CycleData, CurStatus, CurState, Debug, LeftEvents, IsHibernate, Do
          end
    end.
 
-doReplies([], Debug) ->
-   Debug;
-doReplies([{reply, From, Reply} | Replies], Debug) ->
-   reply(From, Reply),
-   NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
-   doReplies(Replies, NewDebug);
-doReplies([OneReply | _Replies], Debug) ->
-   {bad_reply_action, OneReply, Debug}.
-
 replyThenTerminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, Debug, LeftEvents, Replies) ->
-   case doReplies(Replies, Debug) of
-      {bad_reply_action, OneReply, Debug} ->
-         terminate(error, {bad_reply_action, OneReply}, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents);
-      NewDebug ->
-         terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, NewDebug, LeftEvents)
+   NewDebug = ?SYS_DEBUG(Debug, {out, Replies}),
+   try
+      terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, NewDebug, LeftEvents)
+   after
+      case Replies of
+         {reply, From, Reply} ->
+            reply(From, Reply);
+         _ ->
+            [reply(From, Reply) || {reply, From, Reply} <- Replies]
+      end
    end.
 
 terminate(Class, Reason, Stacktrace, #cycleData{module = Module} = CycleData, CurStatus, CurState, Debug, LeftEvents) ->
@@ -1942,7 +1943,6 @@ clientStacktrace([{{call, {Pid, _Tag}}, _Req} | _]) when is_pid(Pid) ->
    end;
 clientStacktrace([_ | _]) ->
    undefined.
-
 
 format_log(#{label:={gen_statusm, terminate},
    name:=Name,
@@ -2052,9 +2052,7 @@ format_client_log({Pid, remote}) ->
    {"** Client ~p is remote on node ~p~n", [Pid, node(Pid)]};
 format_client_log({_Pid, {Name, Stacktrace}}) ->
    {"** Client ~tp stacktrace~n"
-   "** ~tp~n",
-      [Name, error_logger:limit_term(Stacktrace)]}.
-
+   "** ~tp~n", [Name, error_logger:limit_term(Stacktrace)]}.
 
 %% Call Module:format_status/2 or return a default value
 format_status(Opt, PDict, #cycleData{module = Module}, CurStatus, CurState) ->
@@ -2084,7 +2082,6 @@ format_status_default(Opt, Status_State) ->
 %% Format debug messages.  Print them as the call-back module sees
 %% them, not as the real erlang messages.  Use trace for that.
 %%--------------------------------------------------------------------------
-
 print_event(Dev, SystemEvent, Name) ->
    case SystemEvent of
       {in, Event, Status} ->
@@ -2093,6 +2090,8 @@ print_event(Dev, SystemEvent, Name) ->
          io:format(Dev, "*DBG* ~tp receive ~ts after code change in status ~tp~n", [Name, event_string(Event), Status]);
       {out, Reply, {To, _Tag}} ->
          io:format(Dev, "*DBG* ~tp send ~tp to ~tw~n", [Name, Reply, To]);
+      {out, Replies} ->
+         io:format(Dev, "*DBG* ~tp send ~tp to list ~tw~n", [Name, Replies]);
       {enter, Status} ->
          io:format(Dev, "*DBG* ~tp enter in status ~tp~n", [Name, Status]);
       {start_timer, Action, Status} ->
