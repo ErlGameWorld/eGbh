@@ -152,8 +152,10 @@
 
 -type eventCallbackResult() ::
    {'reply', Reply :: term(), NewState :: term()} |                                                                    % 用作gen_server模式时快速响应进入消息接收
+   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term()} |                                             % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
    {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
    {'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |                            % 用作gen_server模式时快速响应进入消息接收
+   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |            % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
    {'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                                           % 用作gen_server模式时快速响应进入循环
    {'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
    {'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |                         % Status transition, maybe to the same status
@@ -720,12 +722,16 @@ cast({via, RegMod, Name}, Msg) ->
       _:_ -> ok
    end;
 cast({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
-   try erlang:send(Dest, {'$gen_cast', Msg})
+   try
+      erlang:send(Dest, {'$gen_cast', Msg}),
+      ok
    catch
       error:_ -> ok
    end;
 cast(Dest, Msg) ->
-   try erlang:send(Dest, {'$gen_cast', Msg})
+   try
+      erlang:send(Dest, {'$gen_cast', Msg}),
+      ok
    catch
       error:_ -> ok
    end.
@@ -738,7 +744,9 @@ abcast(Nodes, Name, Msg) when is_list(Nodes), is_atom(Name) ->
    doAbcast(Nodes, Name, Msg).
 
 doAbcast([Node | Nodes], Name, Msg) when is_atom(Node) ->
-   try erlang:send({Name, Node}, {'$gen_cast', Msg})
+   try
+      erlang:send({Name, Node}, {'$gen_cast', Msg}),
+      ok
    catch
       error:_ -> ok
    end,
@@ -1381,17 +1389,17 @@ handleEnterCallbackRet(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEv
          dealEnterCallbackRet(CycleData, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false);
       {keepStatus, NewState, Actions} ->
          parseEnterActionsList(CycleData, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false, Actions);
-      keepStatusData ->
+      keepStatusState ->
          dealEnterCallbackRet(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false);
-      {keepStatusData, Actions} ->
+      {keepStatusState, Actions} ->
          parseEnterActionsList(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false, Actions);
       {repeatStatus, NewState} ->
          dealEnterCallbackRet(CycleData, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true);
       {repeatStatus, NewState, Actions} ->
          parseEnterActionsList(CycleData, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true, Actions);
-      repeatStatusData ->
+      repeatStatusState ->
          dealEnterCallbackRet(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true);
-      {repeatStatusData, Actions} ->
+      {repeatStatusState, Actions} ->
          parseEnterActionsList(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true, Actions);
       stop ->
          terminate(exit, normal, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents);
@@ -1428,17 +1436,17 @@ handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result
          dealEventCallbackRet(CycleData, CurStatus, NewState, CurStatus, Debug, LeftEvents, false);
       {keepStatus, NewState, Actions} ->
          parseEventActionsList(CycleData, CurStatus, NewState, CurStatus, Debug, LeftEvents, false, Actions, CallbackForm);
-      keepStatusData ->
+      keepStatusState ->
          dealEventCallbackRet(CycleData, CurStatus, CurState, CurStatus, Debug, LeftEvents, false);
-      {keepStatusData, Actions} ->
+      {keepStatusState, Actions} ->
          parseEventActionsList(CycleData, CurStatus, CurState, CurStatus, Debug, LeftEvents, false, Actions, CallbackForm);
       {repeatStatus, NewState} ->
          dealEventCallbackRet(CycleData, CurStatus, NewState, CurStatus, Debug, LeftEvents, true);
       {repeatStatus, NewState, Actions} ->
          parseEventActionsList(CycleData, CurStatus, NewState, CurStatus, Debug, LeftEvents, true, Actions, CallbackForm);
-      repeatStatusData ->
+      repeatStatusState ->
          dealEventCallbackRet(CycleData, CurStatus, CurState, CurStatus, Debug, LeftEvents, true);
-      {repeatStatusData, Actions} ->
+      {repeatStatusState, Actions} ->
          parseEventActionsList(CycleData, CurStatus, CurState, CurStatus, Debug, LeftEvents, true, Actions, CallbackForm);
       stop ->
          terminate(exit, normal, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents);
@@ -1450,11 +1458,11 @@ handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result
          replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents, Replies);
       {stopReply, Reason, Replies, NewState} ->
          replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, NewState, Debug, LeftEvents, Replies);
-      {reply, Reply, NewState} when CallbackForm == ?CB_FORM_EVENT ->
+      {reply, Reply, NewState} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
          receiveMsgWait(CycleData, CurStatus, NewState, NewDebug, false);
-      {reply, Reply, NewState, Option} when CallbackForm == ?CB_FORM_EVENT ->
+      {reply, Reply, NewState, Option} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
          case Option of
@@ -1465,6 +1473,14 @@ handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result
             _Ret ->
                terminate(error, {bad_reply_option, _Ret}, ?STACKTRACE(), CycleData, CurStatus, NewState, Debug, [])
          end;
+      {sreply, Reply, NewStatus, NewState} ->
+         reply(From, Reply),
+         NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
+         dealEventCallbackRet(CycleData, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus);
+      {sreply, Reply, NewStatus, NewState, Actions} ->
+         reply(From, Reply),
+         NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
+         parseEventActionsList(CycleData, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus, Actions, CallbackForm);
       _ ->
          terminate(error, {bad_return_from_status_function, Result}, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents)
    end.
@@ -2091,7 +2107,7 @@ print_event(Dev, SystemEvent, Name) ->
       {out, Reply, {To, _Tag}} ->
          io:format(Dev, "*DBG* ~tp send ~tp to ~tw~n", [Name, Reply, To]);
       {out, Replies} ->
-         io:format(Dev, "*DBG* ~tp send ~tp to list ~tw~n", [Name, Replies]);
+         io:format(Dev, "*DBG* ~tp sendto list ~tw~n", [Name, Replies]);
       {enter, Status} ->
          io:format(Dev, "*DBG* ~tp enter in status ~tp~n", [Name, Status]);
       {start_timer, Action, Status} ->
