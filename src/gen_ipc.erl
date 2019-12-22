@@ -1810,9 +1810,11 @@ cancelTimer(TimeoutType, TimerRef, Timers) ->
       false ->
          %% 找不到计时器，我们还没有看到超时消息
          receive
-            {TimeoutType, TimerRef, _Msg} ->
+            {timeout, TimerRef, TimeoutType} ->
                %% 丢弃该超时消息
                ok
+         after 0 ->
+            ok
          end;
       _ ->
          %% Timer 已经运行了
