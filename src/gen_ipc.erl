@@ -1,14 +1,19 @@
 -module(gen_ipc).
 
+-compile(inline).
+-compile({inline_size, 128}).
+
 -include_lib("kernel/include/logger.hrl").
 
 -export([
    %% API for gen_server or gen_statem behaviour
    start/3, start/4, start_link/3, start_link/4
+   , start_monitor/3, start_monitor/4
    , stop/1, stop/3
    , cast/2
    , abcast/2, abcast/3
    , call/2, call/3
+   , send_request/2, wait_response/1, wait_response/2, check_response/2
    , multi_call/2, multi_call/3, multi_call/4
    , enter_loop/4, enter_loop/5, enter_loop/6
    , reply/1, reply/2
@@ -31,7 +36,7 @@
    , format_status/2
 
    %% Internal callbacks
-   , wakeup_from_hibernate/5
+   , wakeup_from_hibernate/6
    %% logger callback
    , format_log/1
    , epm_log/1
@@ -55,12 +60,12 @@
 
 %% debug 调试相关宏定义
 -define(NOT_DEBUG, []).
--define(SYS_DEBUG(Debug, SystemEvent),
+-define(SYS_DEBUG(Debug, CycleData, SystemEvent),
    case Debug of
       ?NOT_DEBUG ->
          Debug;
       _ ->
-         sys:handle_debug(Debug, fun print_event/3, getProName(), SystemEvent)
+         sys:handle_debug(Debug, fun print_event/3, element(#cycleData.name, CycleData), SystemEvent)
    end).
 
 %%%==========================================================================
@@ -68,13 +73,14 @@
 %%%==========================================================================
 %% gen:call 发送消息来源进程格式类型
 -type from() :: {To :: pid(), Tag :: term()}.
+-type requestId() :: term().
 
 %% 事件类型
 -type eventType() :: externalEventType() | timeoutEventType() | {'onevent', Subtype :: term()}.
 -type externalEventType() :: {'call', From :: from()} | 'cast' | 'info'.
 -type timeoutEventType() :: 'eTimeout' | 'sTimeout' | {'gTimeout', Name :: term()}.
 
-%% 是否改进程捕捉信号 gen_event管理进程需要设置该参数为true
+%% 是否捕捉信号 gen_event管理进程需要设置该参数为true
 -type isTrapExit() :: boolean().
 %% 是否允许进入enter 回调
 -type isEnter() :: boolean().
@@ -87,7 +93,7 @@
 -type timeouts() :: Time :: timeout() | integer().
 -type timeoutOption() :: {abs, Abs :: boolean()}.
 
-% gen_event模式下回调模块的Key
+% gen_event模式下回调模块的标识
 -type epmHandler() :: atom() | {atom(), term()}.
 
 %% 在状态更改期间:
@@ -101,90 +107,90 @@
 %% 如果有postponed 事件则 事件执行顺序为 超时添加和更新 + 零超时 + 当前事件 + 反序的Postpone事件 + LeftEvent
 %% 处理待处理的事件，或者如果没有待处理的事件，则服务器进入接收或休眠状态（当“hibernate”为“ true”时）
 -type initAction() ::
-   {trap_exit, Bool :: isTrapExit()} |                                      % 设置是否捕捉信息 主要用于gen_event模式下
-   eventAction().
+{trap_exit, Bool :: isTrapExit()} |                                      % 设置是否捕捉信息 主要用于gen_event模式下
+eventAction().
 
 -type eventAction() ::
-   {'doAfter', Args :: term()} |                                           % 设置执行某事件后是否回调 handleAfter
-   {'isPostpone', Bool :: isPostpone()} |                                  % 设置推迟选项
-   {'nextEvent', EventType :: eventType(), EventContent :: term()} |       % 插入事件作为下一个处理
-   commonAction().
+{'doAfter', Args :: term()} |                                           % 设置执行某事件后是否回调 handleAfter
+{'isPostpone', Bool :: isPostpone()} |                                  % 设置推迟选项
+{'nextEvent', EventType :: eventType(), EventContent :: term()} |       % 插入事件作为下一个处理
+commonAction().
 
 -type afterAction() ::
-   {'nextEvent', EventType :: eventType(), EventContent :: term()} |       % 插入事件作为下一个处理
-   commonAction().
+{'nextEvent', EventType :: eventType(), EventContent :: term()} |       % 插入事件作为下一个处理
+commonAction().
 
 -type enterAction() ::
-   {'isPostpone', false} |                                                  % 虽然enter action 不能设置postpone 但是可以取消之前event的设置
-   commonAction().
+{'isPostpone', false} |                                                  % 虽然enter action 不能设置postpone 但是可以取消之前event的设置
+commonAction().
 
 -type commonAction() ::
-   {'isEnter', Bool :: isEnter()} |
-   {'isHibernate', Bool :: isHibernate()} |
-   timeoutAction() |
-   replyAction().
+{'isEnter', Bool :: isEnter()} |
+{'isHibernate', Bool :: isHibernate()} |
+timeoutAction() |
+replyAction().
 
 -type timeoutAction() ::
-   timeoutNewAction() |
-   timeoutCancelAction() |
-   timeoutUpdateAction().
+timeoutNewAction() |
+timeoutCancelAction() |
+timeoutUpdateAction().
 
 -type timeoutNewAction() ::
-   {'eTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the event_timeout option
-   {'eTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |                          % Set the generic_timeout option
-   {{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term()} |                                        % Set the generic_timeout option
-   {{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |        % Set the status_timeout option
-   {'sTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the status_timeout option
-   {'sTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])}.
+{'eTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the event_timeout option
+{'eTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |                          % Set the event_timeout option
+{{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term()} |                                        % Set the generic_timeout option
+{{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |        % Set the generic_timeout option
+{'sTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the status_timeout option
+{'sTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])}.                           % Set the status_timeout option
 
 -type timeoutCancelAction() ::
-   'c_eTimeout' |
-   {'c_gTimeout', Name :: term()} |
-   'c_sTimeout'.
+'c_eTimeout' |                                                                                                      % 不可能也不需要更新此超时，因为任何其他事件都会自动取消它。
+{'c_gTimeout', Name :: term()} |
+'c_sTimeout'.
 
 -type timeoutUpdateAction() ::
-   {'u_eTimeout', EventContent :: term()} |
-   {{'u_gTimeout', Name :: term()}, EventContent :: term()} |
-   {'u_sTimeout', EventContent :: term()}.
+{'u_eTimeout', EventContent :: term()} |                                                                            % 不可能也不需要取消此超时，因为任何其他事件都会自动取消它。
+{{'u_gTimeout', Name :: term()}, EventContent :: term()} |
+{'u_sTimeout', EventContent :: term()}.
 
 -type replyAction() ::
-   {'reply', From :: from(), Reply :: term()}.
+{'reply', From :: from(), Reply :: term()}.
 
 -type eventCallbackResult() ::
-   {'reply', Reply :: term(), NewState :: term()} |                                                                    % 用作gen_server模式时快速响应进入消息接收
-   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term()} |                                             % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
-   {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
-   {'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |                            % 用作gen_server模式时快速响应进入消息接收
-   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |            % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
-   {'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                                           % 用作gen_server模式时快速响应进入循环
-   {'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
-   {'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |                         % Status transition, maybe to the same status
-   commonCallbackResult(eventAction()).
+{'reply', Reply :: term(), NewState :: term()} |                                                                    % 用作gen_server模式时快速响应进入消息接收
+{'sreply', Reply :: term(), NextStatus :: term(), NewState :: term()} |                                             % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
+{'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
+{'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |                            % 用作gen_server模式时快速响应进入消息接收
+{'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |            % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
+{'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                                           % 用作gen_server模式时快速响应进入循环
+{'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
+{'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |                         % Status transition, maybe to the same status
+commonCallbackResult(eventAction()).
 
 -type afterCallbackResult() ::
-   {'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
-   {'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [afterAction(), ...]} |                         % Status transition, maybe to the same status
-   {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
-   {'noreply', NewState :: term(), Options :: hibernate} |                                                             % 用作gen_server模式时快速响应进入消息接收
-   commonCallbackResult(afterAction()).
+{'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
+{'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [afterAction(), ...]} |                         % Status transition, maybe to the same status
+{'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
+{'noreply', NewState :: term(), Options :: hibernate} |                                                             % 用作gen_server模式时快速响应进入消息接收
+commonCallbackResult(afterAction()).
 
 -type enterCallbackResult() ::
-   commonCallbackResult(enterAction()).
+commonCallbackResult(enterAction()).
 
 -type commonCallbackResult(ActionType) ::
-   {'keepStatus', NewState :: term()} |                                                                                % {keep_status,NewData,[]}
-   {'keepStatus', NewState :: term(), Actions :: [ActionType]} |                                                       % Keep status, change data
-   'keepStatusState' |                                                                                                 % {keep_status_and_data,[]}
-   {'keepStatusState', Actions :: [ActionType]} |                                                                      % Keep status and data -> only actions
-   {'repeatStatus', NewState :: term()} |                                                                              % {repeat_status,NewData,[]}
-   {'repeatStatus', NewState :: term(), Actions :: [ActionType]} |                                                     % Repeat status, change data
-   'repeatStatusState' |                                                                                               % {repeat_status_and_data,[]}
-   {'repeatStatusState', Actions :: [ActionType]} |                                                                    % Repeat status and data -> only actions
-   'stop' |                                                                                                            % {stop,normal}
-   {'stop', Reason :: term()} |                                                                                        % Stop the server
-   {'stop', Reason :: term(), NewState :: term()} |                                                                    % Stop the server
-   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...]} |                                                  % Reply then stop the server
-   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...], NewState :: term()}.                               % Reply then stop the server
+{'keepStatus', NewState :: term()} |                                                                                % {keep_status,NewData,[]}
+{'keepStatus', NewState :: term(), Actions :: [ActionType]} |                                                       % Keep status, change data
+'keepStatusState' |                                                                                                 % {keep_status_and_data,[]}
+{'keepStatusState', Actions :: [ActionType]} |                                                                      % Keep status and data -> only actions
+{'repeatStatus', NewState :: term()} |                                                                              % {repeat_status,NewData,[]}
+{'repeatStatus', NewState :: term(), Actions :: [ActionType]} |                                                     % Repeat status, change data
+'repeatStatusState' |                                                                                               % {repeat_status_and_data,[]}
+{'repeatStatusState', Actions :: [ActionType]} |                                                                    % Repeat status and data -> only actions
+'stop' |                                                                                                            % {stop,normal}
+{'stop', Reason :: term()} |                                                                                        % Stop the server
+{'stop', Reason :: term(), NewState :: term()} |                                                                    % Stop the server
+{'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...]} |                                  % Reply then stop the server
+{'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...], NewState :: term()}.               % Reply then stop the server
 
 %% 状态机的初始化功能函数
 %% 如果要模拟gen_server init返回定时时间 可以在Actions返回定时动作
@@ -256,72 +262,75 @@
    PDict :: [{Key :: term(), Value :: term()}].
 
 -optional_callbacks([
-   formatStatus/2
-   , terminate/3
-   , code_change/4
-   , handleEnter/3
-   , handleAfter/3
-   , handleOnevent/4
-   , handleEpmEvent/3
-   , handleEpmCall/3
-   , handleEpmInfo/3
+formatStatus/2
+, terminate/3
+, code_change/4
+, handleEnter/3
+, handleAfter/3
+, handleOnevent/4
+, handleEpmEvent/3
+, handleEpmCall/3
+, handleEpmInfo/3
 ]).
 
 -record(cycleData, {
-   module :: atom()
+   parent = undefined :: pid()
+   , name = undefined :: atom() | pid()
    , isEnter = false :: boolean()
    , hibernateAfter = infinity :: timeout()
    , postponed = [] :: [{eventType(), term()}]
    , timers = #{} :: #{TimeoutType :: timeoutEventType() => {TimerRef :: reference(), TimeoutMsg :: term()}}
+   , epmList = []
+   , epmHer = #{}
 }).
 
 -record(epmHer, {
    epmM :: atom(),
    epmId = false,
    epmS :: term(),
-   epmSup = false :: 'false' | pid()}).
+   epmSup = false :: 'false' | pid()
+}).
 
--compile({inline, [isEventType/1]}).
-
-isEventType(Type) ->
-   case Type of
-      {'call', {_Pid, _Ref}} -> true;
-      'cast' -> true;
-      'info' -> true;
-      {'onevent', _SubType} -> true;
-      'eTimeout' -> true;
-      'sTimeout' -> true;
-      {'gTimeout', _Name} -> true;
-      _ ->
-         false
-   end.
+% isEventType(Type) ->
+%    case Type of
+%       'cast' -> true;
+%       'info' -> true;
+%       'eTimeout' -> true;
+%       'sTimeout' -> true;
+%       {'call', _Form} -> true;
+%       {'gTimeout', _Name} -> true;
+%       {'onevent', _SubType} -> true;
+%       _ ->
+%          false
+%    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% start stop API start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -type serverName() ::
-   {'local', atom()} |
-   {'global', GlobalName :: term()} |
-   {'via', RegMod :: module(), Name :: term()}.
+{'local', atom()} |
+{'global', GlobalName :: term()} |
+{'via', RegMod :: module(), Name :: term()}.
 
 -type serverRef() ::
-   pid()   |
-   (LocalName :: atom()) |
-   {Name :: atom(), Node :: atom()} |
-   {'global', GlobalName :: term()} |
-   {'via', RegMod :: module(), ViaName :: term()}.
+pid()   |
+(LocalName :: atom()) |
+{Name :: atom(), Node :: atom()} |
+{'global', GlobalName :: term()} |
+{'via', RegMod :: module(), ViaName :: term()}.
 
 -type startOpt() ::
-   {'timeout', Time :: timeout()} |
-   {'spawn_opt', [proc_lib:spawn_option()]} |
-   enterLoopOpt().
+{'timeout', Time :: timeout()} |
+{'spawn_opt', [proc_lib:spawn_option()]} |
+enterLoopOpt().
 
 -type enterLoopOpt() ::
-   {'debug', Debugs :: [sys:debug_option()]} |
-   {'hibernate_after', HibernateAfterTimeout :: timeout()}.
+{'debug', Debugs :: [sys:debug_option()]} |
+{'hibernate_after', HibernateAfterTimeout :: timeout()}.
 
 -type startRet() ::
-   'ignore' |
-   {'ok', pid()} |
-   {'error', term()}.
+'ignore' |
+{'ok', pid()} |
+{'ok', {pid(), reference()}} |
+{'error', term()}.
 
 -spec start(Module :: module(), Args :: term(), Opts :: [startOpt()]) -> startRet().
 start(Module, Args, Opts) ->
@@ -338,6 +347,15 @@ start_link(Module, Args, Opts) ->
 -spec start_link(ServerName :: serverName(), Module :: module(), Args :: term(), Opts :: [startOpt()]) -> startRet().
 start_link(ServerName, Module, Args, Opts) ->
    gen:start(?MODULE, link, ServerName, Module, Args, Opts).
+
+%% Start and monitor
+-spec start_monitor(Module :: module(), Args :: term(), Opts :: [startOpt()]) -> startRet().
+start_monitor(Module, Args, Opts) ->
+   gen:start(?MODULE, monitor, Module, Args, Opts).
+%%
+-spec start_monitor(ServerName :: serverName(), Module :: module(), Args :: term(), Opts :: [startOpt()]) -> startRet().
+start_monitor(ServerName, Module, Args, Opts) ->
+   gen:start(?MODULE, monitor, ServerName, Module, Args, Opts).
 
 
 -spec stop(ServerRef :: serverRef()) -> ok.
@@ -385,17 +403,18 @@ init_it(Starter, Parent, ServerRef, Module, Args, Opts) ->
       {'EXIT', Class, Reason, Stacktrace} ->
          gen:unregister_name(ServerRef),
          proc_lib:init_ack(Starter, {error, Reason}),
-         error_info(Class, Reason, Stacktrace, #cycleData{module = Module}, 'Sun_init', '$un_init', Debug, []),
+         error_info(Class, Reason, Stacktrace, #cycleData{}, Module, 'Sun_init', '$un_init', Debug, []),
          erlang:raise(Class, Reason, Stacktrace);
       _Ret ->
          gen:unregister_name(ServerRef),
-         Error = {badReturnFrom_doModuleInit, _Ret},
+         Error = {'init_bad_return', _Ret},
          proc_lib:init_ack(Starter, {error, Error}),
-         error_info(error, Error, ?STACKTRACE(), #cycleData{module = Module}, '$un_init', '$un_init', Debug, []),
+         error_info(error, Error, ?STACKTRACE(), #cycleData{}, Module, '$un_init', '$un_init', Debug, []),
          exit(Error)
    end.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen callbacks end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% 进入循环 调用该进程必须使用proc_lib启动 且已经初始化状态和数据 包括注册名称
+%% 可以通过使用与从init / 1返回的参数相同的参数，而不是通过start / 3,4或start_link / 3,4启动状态机，而将当前由proc_lib启动的进程转换为状态机。
 -spec enter_loop(Module :: module(), Status :: term(), State :: term(), Opts :: [enterLoopOpt()]) -> no_return().
 enter_loop(Module, Status, State, Opts) ->
    enter_loop(Module, Status, State, Opts, self(), []).
@@ -404,9 +423,9 @@ enter_loop(Module, Status, State, Opts) ->
 enter_loop(Module, Status, State, Opts, ServerOrActions) ->
    if
       is_list(ServerOrActions) ->
-         enter_loop(Module, Opts, Status, State, self(), ServerOrActions);
+         enter_loop(Module, Status, State, Opts, self(), ServerOrActions);
       true ->
-         enter_loop(Module, Opts, Status, State, ServerOrActions, [])
+         enter_loop(Module, Status, State, Opts, ServerOrActions, [])
    end.
 
 -spec enter_loop(Module :: module(), Status :: term(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), Actions :: [eventAction()]) -> no_return().
@@ -420,9 +439,7 @@ enter_loop(Module, Status, State, Opts, ServerName, Actions) ->
 
 %% 这里的 init_it/6 和 enter_loop/5,6,7 函数汇聚
 loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, CurStatus, CurState, Actions) ->
-   setParent(Parent),
-   setProName(Name),
-   %% 如果该进程用于 gen_event 则需要设置  process_flag(trap_exit, true) 需要在Actions返回 {trap_exit, true}
+   %% 如果该进程用于 gen_event 或者该进程需要捕捉退出信号 和 捕捉supervisor进程树的退出信息 则需要设置   process_flag(trap_exit, true) 需要在Actions返回 {trap_exit, true}
    MewActions =
       case lists:keyfind(trap_exit, 1, Actions) of
          false ->
@@ -434,27 +451,27 @@ loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, CurStatus, CurStat
             lists:keydelete(trap_exit, 1, Actions)
       end,
 
-   CycleData = #cycleData{module = Module, hibernateAfter = HibernateAfterTimeout},
-   NewDebug = ?SYS_DEBUG(Debug, {enter, CurStatus}),
+   CycleData = #cycleData{parent = Parent, name = Name, hibernateAfter = HibernateAfterTimeout},
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {enter, CurStatus}),
    %% 强制执行{postpone，false}以确保我们的假事件被丢弃
    LastActions = MewActions ++ [{isPostpone, false}],
-   parseEventActionsList(CycleData, CurStatus, CurState, CurStatus, NewDebug, [{onevent, init_status}], true, LastActions, ?CB_FORM_EVENT).
+   parseEventAL(CycleData, Module, CurStatus, CurState, CurStatus, NewDebug, [{onevent, init_status}], true, LastActions, ?CB_FORM_EVENT).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-system_continue(Parent, Debug, {CycleData, CurStatus, CurState, IsHibernate}) ->
-   updateParent(Parent),
+system_continue(Parent, Debug, {CycleData, Module, CurStatus, CurState, IsHibernate}) ->
+   NewCycleData = updateParent(Parent, CycleData),
    if
       IsHibernate ->
-         proc_lib:hibernate(?MODULE, wakeup_from_hibernate, [CycleData, CurStatus, CurState, Debug, IsHibernate]);
+         proc_lib:hibernate(?MODULE, wakeup_from_hibernate, [NewCycleData, Module, CurStatus, CurState, Debug, IsHibernate]);
       true ->
-         receiveMsgWait(CycleData, CurStatus, CurState, Debug, IsHibernate)
+         receiveMsgWait(NewCycleData, Module, CurStatus, CurState, Debug, IsHibernate)
    end.
 
-system_terminate(Reason, Parent, Debug, {CycleData, CurStatus, CurState, _IsHibernate}) ->
-   updateParent(Parent),
-   terminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, []).
+system_terminate(Reason, Parent, Debug, {CycleData, Module, CurStatus, CurState, _IsHibernate}) ->
+   NewCycleData = updateParent(Parent, CycleData),
+   terminate(exit, Reason, ?STACKTRACE(), NewCycleData, Module, CurStatus, CurState, Debug, []).
 
-system_code_change({#cycleData{module = Module} = CycleData, CurStatus, CurState, IsHibernate}, _Mod, OldVsn, Extra) ->
+system_code_change({CycleData, Module, CurStatus, CurState, IsHibernate}, _Mod, OldVsn, Extra) ->
    case
       try Module:code_change(OldVsn, CurStatus, CurState, Extra)
       catch
@@ -462,21 +479,21 @@ system_code_change({#cycleData{module = Module} = CycleData, CurStatus, CurState
       end
    of
       {ok, NewStatus, NewState} ->
-         {ok, {CycleData, NewStatus, NewState, IsHibernate}};
+         {ok, {CycleData, Module, NewStatus, NewState, IsHibernate}};
       Error ->
          Error
    end.
 
-system_get_state({_CycleData, CurStatus, CurState, _IsHibernate}) ->
+system_get_state({_CycleData, _Module, CurStatus, CurState, _IsHibernate}) ->
    {ok, {CurStatus, CurState}}.
 
-system_replace_state(StatusFun, {CycleData, CurStatus, CurState, IsHibernate}) ->
+system_replace_state(StatusFun, {CycleData, Module, CurStatus, CurState, IsHibernate}) ->
    {NewStatus, NewState} = StatusFun(CurStatus, CurState),
-   {ok, {NewStatus, NewState}, {CycleData, NewStatus, NewState, IsHibernate}}.
+   {ok, {NewStatus, NewState}, {CycleData, Module, NewStatus, NewState, IsHibernate}}.
 
-format_status(Opt, [PDict, SysStatus, Parent, Debug, {#cycleData{timers = Timers, postponed = Postponed} = CycleData, CurStatus, CurState, _IsHibernate}]) ->
-   Header = gen:format_status_header("Status for status machine", getProName()),
-   updateParent(Parent),
+format_status(Opt, [PDict, SysStatus, Parent, Debug, {#cycleData{name = Name, timers = Timers, postponed = Postponed} = CycleData, Module, CurStatus, CurState, _IsHibernate}]) ->
+   Header = gen:format_status_header("Status for status machine", Name),
+   NewCycleData = updateParent(Parent, CycleData),
    Log = sys:get_log(Debug),
    [
       {header, Header},
@@ -489,7 +506,7 @@ format_status(Opt, [PDict, SysStatus, Parent, Debug, {#cycleData{timers = Timers
             {"Postponed", Postponed}
          ]
       } |
-      case format_status(Opt, PDict, CycleData, CurStatus, CurState) of
+      case format_status(Opt, PDict, NewCycleData, CurStatus, Module, CurState) of
          L when is_list(L) -> L;
          T -> [T]
       end
@@ -601,6 +618,23 @@ do_multi_call(Nodes, Name, Request, Timeout) ->
       {'DOWN', Mref, _, _, Reason} ->
          exit(Reason)
    end.
+
+-spec send_request(ServerRef :: serverRef(), Request :: term()) -> RequestId :: requestId().
+send_request(Name, Request) ->
+   gen:send_request(Name, '$gen_call', Request).
+
+-spec wait_response(RequestId :: requestId()) -> {reply, Reply :: term()} | {error, {term(), serverRef()}}.
+wait_response(RequestId) ->
+   gen:wait_response(RequestId, infinity).
+
+-spec wait_response(RequestId :: requestId(), timeout()) -> {reply, Reply :: term()} | 'timeout' | {error, {term(), serverRef()}}.
+wait_response(RequestId, Timeout) ->
+   gen:wait_response(RequestId, Timeout).
+
+-spec check_response(Msg :: term(), RequestId :: requestId()) ->
+   {reply, Reply :: term()} | 'no_reply' | {error, {term(), serverRef()}}.
+check_response(Msg, RequestId) ->
+   gen:check_response(Msg, RequestId).
 
 send_nodes([Node | Tail], Name, Tag, Request, Monitors) when is_atom(Node) ->
    Monitor = start_monitor(Node, Name),
@@ -766,16 +800,11 @@ replies([{reply, From, Reply} | Replies]) ->
 replies([]) ->
    ok.
 
--compile({inline, [reply/2]}).
 -spec reply(From :: from(), Reply :: term()) -> ok.
 reply({To, Tag}, Reply) ->
-   Msg = {Tag, Reply},
-   try To ! Msg of
-      _ ->
-         ok
-   catch
-      _:_ -> ok
-   end.
+   catch To ! {Tag, Reply},
+   ok.
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  end  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen_event  start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 epmRequest({global, Name}, Msg) ->
@@ -954,10 +983,10 @@ doNotify([], _Event, _Func, IsHib) ->
 doEpmHandle(#epmHer{epmM = EpmM, epmS = EpmS} = EpmHer, Func, Event, From) ->
    try EpmM:Func(Event, EpmS) of
       Result ->
-         handleEpmCallbackRet(Result, EpmHer, Event, From)
+         handleEpmCR(Result, EpmHer, Event, From)
    catch
       throw:Ret ->
-         handleEpmCallbackRet(Ret, EpmHer, Event, From);
+         handleEpmCR(Ret, EpmHer, Event, From);
       C:R:S ->
          epmTerminate(EpmHer, {error, {C, R, S}}, Event, crash)
    end;
@@ -1025,7 +1054,7 @@ report_error(#epmHer{epmM = EpmM, epmId = EpmId}, Reason, State, LastIn) ->
       #{
          label=>{gen_ipc, epm_terminate},
          handler => {EpmId, EpmM},
-         name => getProName(),
+         name => undefined,
          last_message => LastIn,
          state=> format_status(terminate, [EpmM, get(), State]),
          reason => Reason
@@ -1079,253 +1108,256 @@ epmStopAll() ->
       end || {EpmId, _EpmM, EpmSup} <- EpmList
    ].
 
-epmStopOne(ExitEmpSup) ->
-   EpmList = getEpmList(),
+epmStopOne(ExitEmpSup, EpmList) ->
    [epmTerminate(getEpmHer(EpmId), stop, 'receive', shutdown) || {EpmId, _EpmM, EpmSup} <- EpmList, ExitEmpSup =:= EpmSup].
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen_event  end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% 仅在＃params.parent不同时更新。今天，这应该是不可能的（OTP-22.0），但是，例如，如果有人在新的sys调用中实现了更改服务器父服务器，则可能发生这种情况。
--compile({inline, updateParent/1}).
-updateParent(Parent) ->
-   case getParent() of
+updateParent(Parent, #cycleData{parent = OldParent} = CycleData) ->
+   case OldParent of
       Parent ->
-         ignore;
+         CycleData;
       _ ->
-         setParent(Parent)
+         setelement(#cycleData.parent, CycleData, Parent)
    end.
 %%%==========================================================================
 %%% Internal callbacks
-wakeup_from_hibernate(CycleData, CurStatus, CurState, Debug, IsHibernate) ->
+wakeup_from_hibernate(CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
    %% 这是一条新消息，唤醒了我们，因此我们必须立即收到它
-   receiveMsgWait(CycleData, CurStatus, CurState, Debug, IsHibernate).
+   receiveMsgWait(CycleData, Module, CurStatus, CurState, Debug, IsHibernate).
 
 %%%==========================================================================
 %% Entry point for system_continue/3
-reLoopEntry(CycleData, CurStatus, CurState, Debug, IsHibernate) ->
+reLoopEntry(CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
    if
       IsHibernate ->
-         proc_lib:hibernate(?MODULE, wakeup_from_hibernate, [CycleData, CurStatus, CurState, Debug, IsHibernate]);
+         proc_lib:hibernate(?MODULE, wakeup_from_hibernate, [CycleData, Module, CurStatus, CurState, Debug, IsHibernate]);
       true ->
-         receiveMsgWait(CycleData, CurStatus, CurState, Debug, IsHibernate)
+         receiveMsgWait(CycleData, Module, CurStatus, CurState, Debug, IsHibernate)
    end.
 
 %% 接收新的消息
-receiveMsgWait(#cycleData{hibernateAfter = HibernateAfterTimeout} = CycleData, CurStatus, CurState, Debug, IsHibernate) ->
+receiveMsgWait(#cycleData{parent = Parent, hibernateAfter = HibernateAfterTimeout, timers = Timers, epmList = EpmList} = CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
    receive
       Msg ->
          case Msg of
             {'$gen_call', From, Request} ->
-               matchCallMsg(CycleData, CurStatus, CurState, Debug, {{call, From}, Request});
+               matchCallMsg(CycleData, Module, CurStatus, CurState, Debug, From, Request);
             {'$gen_cast', Cast} ->
-               matchCastMsg(CycleData, CurStatus, CurState, Debug, {cast, Cast});
+               matchCastMsg(CycleData, Module, CurStatus, CurState, Debug, Cast);
             {timeout, TimerRef, TimeoutType} ->
-               case element(#cycleData.timers, CycleData) of
-                  #{TimeoutType := {TimerRef, TimeoutMsg}} = Timers ->
+               case Timers of
+                  #{TimeoutType := {TimerRef, TimeoutMsg}} ->
                      NewTimer = maps:remove(TimeoutType, Timers),
                      NewCycleData = setelement(#cycleData.timers, CycleData, NewTimer),
-                     matchTimeoutMsg(NewCycleData, CurStatus, CurState, Debug, {TimeoutType, TimeoutMsg});
-                  #{} ->
-                     matchInfoMsg(CycleData, CurStatus, CurState, Debug, {info, Msg})
+                     matchTimeoutMsg(NewCycleData, Module, CurStatus, CurState, Debug, TimeoutType, TimeoutMsg);
+                  _ ->
+                     matchInfoMsg(CycleData, Module, CurStatus, CurState, Debug, Msg)
                end;
             {system, PidFrom, Request} ->
                %% 不返回但尾递归调用 system_continue/3
-               sys:handle_system_msg(Request, PidFrom, getParent(), ?MODULE, Debug, {CycleData, CurStatus, CurState, IsHibernate});
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {CycleData, Module, CurStatus, CurState, IsHibernate});
             {'EXIT', PidFrom, Reason} ->
-               case getParent() of
-                  PidFrom ->
-                     terminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, []);
+               case Parent =:= PidFrom of
+                  true ->
+                     terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, []);
                   _ ->
-                     epmStopOne(PidFrom),
-                     matchInfoMsg(CycleData, CurStatus, CurState, Debug, {info, Msg})
+                     epmStopOne(PidFrom, EpmList),
+                     matchInfoMsg(CycleData, Module, CurStatus, CurState, Debug, Msg)
                end;
             {'$epm_call', From, Request} ->
-               matchEpmCallMsg(CycleData, CurStatus, CurState, Debug, From, Request);
+               matchEpmCallMsg(CycleData, Module, CurStatus, CurState, Debug, From, Request);
             {'$epm_info', CmdOrEmpHandler, Event} ->
-               matchEpmInfoMsg(CycleData, CurStatus, CurState, Debug, CmdOrEmpHandler, Event);
+               matchEpmInfoMsg(CycleData, Module, CurStatus, CurState, Debug, CmdOrEmpHandler, Event);
             _ ->
-               matchInfoMsg(CycleData, CurStatus, CurState, Debug, {info, Msg})
+               matchInfoMsg(CycleData, Module, CurStatus, CurState, Debug, Msg)
          end
    after
       HibernateAfterTimeout ->
-         proc_lib:hibernate(?MODULE, wakeup_from_hibernate, [CycleData, CurStatus, CurState, Debug, IsHibernate])
+         proc_lib:hibernate(?MODULE, wakeup_from_hibernate, [CycleData, Module, CurStatus, CurState, Debug, IsHibernate])
    end.
 
-matchCallMsg(#cycleData{module = Module} = CycleData, CurStatus, CurState, Debug, {{call, From}, Request} = Event) ->
-   NewDebug = ?SYS_DEBUG(Debug, {in, Event, CurStatus}),
+matchCallMsg(CycleData, Module, CurStatus, CurState, Debug, From, Request) ->
+   CurEvent = {{call, From}, Request},
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {in, CurEvent, CurStatus}),
    try Module:handleCall(Request, CurStatus, CurState, From) of
       Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, From)
+         handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, From)
    catch
       throw:Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, From);
+         handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, From);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, NewDebug, [Event])
+         terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent])
    end.
 
-matchCastMsg(#cycleData{module = Module} = CycleData, CurStatus, CurState, Debug, {cast, Cast} = Event) ->
-   NewDebug = ?SYS_DEBUG(Debug, {in, Event, CurStatus}),
+matchCastMsg(CycleData, Module, CurStatus, CurState, Debug, Cast) ->
+   CurEvent = {cast, Cast},
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {in, CurEvent, CurStatus}),
    try Module:handleCast(Cast, CurStatus, CurState) of
       Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, false)
+         handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false)
    catch
       throw:Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, false);
+         handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, NewDebug, [Event])
+         terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent])
    end.
 
-matchInfoMsg(#cycleData{module = Module} = CycleData, CurStatus, CurState, Debug, {info, Msg} = Event) ->
-   NewDebug = ?SYS_DEBUG(Debug, {in, Event, CurStatus}),
+matchInfoMsg(CycleData, Module, CurStatus, CurState, Debug, Msg) ->
+   CurEvent = {info, Msg},
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {in, CurEvent, CurStatus}),
    try Module:handleInfo(Msg, CurStatus, CurState) of
       Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, false)
+         handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false)
    catch
       throw:Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, false);
+         handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, NewDebug, [Event])
+         terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent])
    end.
 
-matchTimeoutMsg(#cycleData{module = Module} = CycleData, CurStatus, CurState, Debug, {TimeoutType, TimeoutMsg} = Event) ->
-   NewDebug = ?SYS_DEBUG(Debug, {in, Event, CurStatus}),
+matchTimeoutMsg(CycleData, Module, CurStatus, CurState, Debug, TimeoutType, TimeoutMsg) ->
+   CurEvent = {TimeoutType, TimeoutMsg},
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {in, CurEvent, CurStatus}),
    try Module:handleOnevent(TimeoutType, TimeoutMsg, CurStatus, CurState) of
       Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, false)
+         handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false)
    catch
       throw:Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, false);
+         handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, NewDebug, [Event])
+         terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent])
    end.
 
-matchEpmCallMsg(CycleData, CurStatus, CurState, Debug, From, Request) ->
-   NewDebug = ?SYS_DEBUG(Debug, {in, Request, CurStatus}),
+matchEpmCallMsg(CycleData, Module, CurStatus, CurState, Debug, From, Request) ->
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {in, Request, CurStatus}),
    case Request of
       '$which_handlers' ->
          reply(From, getEpmList());
       {'$addEpm', EpmHandler, Args} ->
          {Reply, IsHib} = doAddEpm(EpmHandler, Args, false),
          reply(From, Reply),
-         reLoopEntry(CycleData, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(CycleData, Module, CurStatus, CurState, NewDebug, IsHib);
       {'$addSupEpm', EpmHandler, Args, EpmSup} ->
          {Reply, IsHib} = doAddSupEpm(EpmHandler, Args, EpmSup),
          reply(From, Reply),
-         reLoopEntry(CycleData, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(CycleData, Module, CurStatus, CurState, NewDebug, IsHib);
       {'$deleteEpm', EpmHandler, Args} ->
          Reply = doDeleteEpm(EpmHandler, Args),
          reply(From, Reply),
-         receiveMsgWait(CycleData, CurStatus, CurState, NewDebug, false);
+         receiveMsgWait(CycleData, Module, CurStatus, CurState, NewDebug, false);
       {'$swapEpm', EpmId1, Args1, EpmId2, Args2} ->
          {Reply, IsHib} = doSwapEpm(EpmId1, Args1, EpmId2, Args2),
          reply(From, Reply),
-         reLoopEntry(CycleData, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(CycleData, Module, CurStatus, CurState, NewDebug, IsHib);
       {'$swapSupEpm', EpmId1, Args1, EpmId2, Args2, SupPid} ->
          {Reply, IsHib} = doSwapSupEpm(EpmId1, Args1, EpmId2, Args2, SupPid),
          reply(From, Reply),
-         reLoopEntry(CycleData, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(CycleData, Module, CurStatus, CurState, NewDebug, IsHib);
       {'$syncNotify', Event} ->
          IsHib = doNotify(getEpmList(), Event, handleEvent, false),
          reply(From, ok),
-         startEpmCall(CycleData, CurStatus, CurState, NewDebug, handleEpmEvent, Request, IsHib);
+         startEpmCall(CycleData, Module, CurStatus, CurState, NewDebug, handleEpmEvent, Request, IsHib);
       {'$epmCall', EpmHandler, Query} ->
          IsHib = doEpmHandle(getEpmHer(EpmHandler), handleCall, Query, From),
-         startEpmCall(CycleData, CurStatus, CurState, Debug, handleEpmCall, Request, IsHib)
+         startEpmCall(CycleData, Module, CurStatus, CurState, Debug, handleEpmCall, Request, IsHib)
    end.
 
-matchEpmInfoMsg(CycleData, CurStatus, CurState, Debug, CmdOrEmpHandler, Event) ->
+matchEpmInfoMsg(CycleData, Module, CurStatus, CurState, Debug, CmdOrEmpHandler, Event) ->
    case CmdOrEmpHandler of
       '$infoNotify' ->
          IsHib = doNotify(getEpmList(), Event, handleEvent, false),
-         startEpmCall(CycleData, CurStatus, CurState, Debug, handleEpmEvent, Event, IsHib);
+         startEpmCall(CycleData, Module, CurStatus, CurState, Debug, handleEpmEvent, Event, IsHib);
       EpmHandler ->
          IsHib = doEpmHandle(getEpmHer(EpmHandler), Event, handleInfo, false),
-         startEpmCall(CycleData, CurStatus, CurState, Debug, handleEpmInfo, Event, IsHib)
+         startEpmCall(CycleData, Module, CurStatus, CurState, Debug, handleEpmInfo, Event, IsHib)
    end.
 
-startEpmCall(#cycleData{module = Module} = CycleData, CurStatus, CurState, Debug, CallbackFun, Event, IsHib) ->
+startEpmCall(CycleData, Module, CurStatus, CurState, Debug, CallbackFun, Event, IsHib) ->
    case erlang:function_exported(Module, CallbackFun, 3) of
       true ->
-         NewDebug = ?SYS_DEBUG(Debug, {in, Event, CurStatus}),
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {in, Event, CurStatus}),
          try Module:CallbackFun(Event, CurStatus, CurState) of
             Result ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, false)
+               handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, false)
          catch
             throw:Ret ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, NewDebug, [Event], Ret, ?CB_FORM_EVENT, false);
+               handleEventCR(CycleData, Module, CurStatus, CurState, NewDebug, [Event], Ret, ?CB_FORM_EVENT, false);
             Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, NewDebug, [Event])
+               terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, [Event])
          end;
       _ ->
-         receiveMsgWait(CycleData, CurStatus, CurState, Debug, IsHib)
+         receiveMsgWait(CycleData, Module, CurStatus, CurState, Debug, IsHib)
    end.
 
-startEnterCall(#cycleData{module = Module} = CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter) ->
+startEnterCall(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter) ->
    try Module:handleEnter(PrevStatus, CurStatus, CurState) of
       Result ->
-         handleEnterCallbackRet(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, Result)
+         handleEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, Result)
    catch
       throw:Result ->
-         handleEnterCallbackRet(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, Result);
+         handleEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, Result);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, CycleData, Debug, CurStatus, CurState, LeftEvents)
+         terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
    end.
 
-startAfterCall(#cycleData{module = Module} = CycleData, CurStatus, CurState, Debug, LeftEvents, Args) ->
+startAfterCall(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Args) ->
    try Module:handleAfter(Args, CurStatus, CurState) of
       Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_AFTER, false)
+         handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_AFTER, false)
    catch
       throw:Result ->
-         handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_AFTER, false);
+         handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_AFTER, false);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, Debug, LeftEvents)
+         terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
    end.
 
-startEventCall(#cycleData{module = Module} = CycleData, CurStatus, CurState, Debug, LeftEvents, {Type, Content}) ->
+startEventCall(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, {Type, Content}) ->
    case Type of
       'cast' ->
          try Module:handleCast(Content, CurStatus, CurState) of
             Result ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
+               handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
          catch
             throw:Ret ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
+               handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
             Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, Debug, LeftEvents)
+               terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
          end;
       'info' ->
          try Module:handleInfo(Content, CurStatus, CurState) of
             Result ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
+               handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
          catch
             throw:Ret ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
+               handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
             Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, Debug, LeftEvents)
+               terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
          end;
       {'call', From} ->
          try Module:handleCall(Content, CurStatus, CurState, From) of
             Result ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, From)
+               handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, From)
          catch
             throw:Ret ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, From);
+               handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, From);
             Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, Debug, LeftEvents)
+               terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
          end;
       _ ->
          try Module:handleOnevent(Type, Content, CurStatus, CurState) of
             Result ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
+               handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
          catch
             throw:Ret ->
-               handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
+               handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
             Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, Debug, LeftEvents)
+               terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
          end
    end.
 
-handleEpmCallbackRet(Result, EpmHer, Event, From) ->
+%% handleEpmCallbackRet
+handleEpmCR(Result, EpmHer, Event, From) ->
    case Result of
       ok ->
          ok;
@@ -1382,247 +1414,251 @@ handleEpmCallbackRet(Result, EpmHer, Event, From) ->
          epmTerminate(EpmHer, {error, Other}, Event, crash),
          ok
    end.
-
-handleEnterCallbackRet(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, Result) ->
+%% handleEnterCallbackRet
+handleEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, Result) ->
    case Result of
       {keepStatus, NewState} ->
-         dealEnterCallbackRet(CycleData, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false);
+         dealEnterCR(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false);
       {keepStatus, NewState, Actions} ->
-         parseEnterActionsList(CycleData, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false, Actions);
+         parseEnterAL(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false, Actions);
       keepStatusState ->
-         dealEnterCallbackRet(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false);
+         dealEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false);
       {keepStatusState, Actions} ->
-         parseEnterActionsList(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false, Actions);
+         parseEnterAL(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, false, Actions);
       {repeatStatus, NewState} ->
-         dealEnterCallbackRet(CycleData, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true);
+         dealEnterCR(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true);
       {repeatStatus, NewState, Actions} ->
-         parseEnterActionsList(CycleData, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true, Actions);
+         parseEnterAL(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true, Actions);
       repeatStatusState ->
-         dealEnterCallbackRet(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true);
+         dealEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true);
       {repeatStatusState, Actions} ->
-         parseEnterActionsList(CycleData, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true, Actions);
+         parseEnterAL(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, true, Actions);
       stop ->
-         terminate(exit, normal, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents);
+         terminate(exit, normal, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents);
       {stop, Reason} ->
-         terminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents);
+         terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents);
       {stop, Reason, NewState} ->
-         terminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, NewState, Debug, LeftEvents);
+         terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, LeftEvents);
       {stopReply, Reason, Replies} ->
-         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents, Replies);
+         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Replies);
       {stopReply, Reason, Replies, NewState} ->
-         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, NewState, Debug, LeftEvents, Replies);
+         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, LeftEvents, Replies);
       _ ->
-         terminate(error, {badReturnFrom_EnterFunction, Result}, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents)
+         terminate(error, {bad_handleEnterCR, Result}, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
    end.
 
-handleEventCallbackRet(CycleData, CurStatus, CurState, Debug, LeftEvents, Result, CallbackForm, From) ->
+handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, CallbackForm, From) ->
    case Result of
       {noreply, NewState} ->
-         receiveMsgWait(CycleData, CurStatus, NewState, Debug, false);
+         receiveMsgWait(CycleData, Module, CurStatus, NewState, Debug, false);
       {noreply, NewState, Option} ->
          case Option of
             hibernate ->
-               reLoopEntry(CycleData, CurStatus, NewState, Debug, true);
+               reLoopEntry(CycleData, Module, CurStatus, NewState, Debug, true);
             {doAfter, Args} ->
-               startAfterCall(CycleData, CurStatus, NewState, Debug, [], Args);
+               startAfterCall(CycleData, Module, CurStatus, NewState, Debug, [], Args);
             _Ret ->
-               terminate(error, {bad_reply_option, _Ret}, ?STACKTRACE(), CycleData, CurStatus, NewState, Debug, [])
+               terminate(error, {bad_noreply, _Ret}, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, [])
          end;
-      {nextStatus, NewStatus, NewState} ->
-         dealEventCallbackRet(CycleData, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus);
-      {nextStatus, NewStatus, NewState, Actions} ->
-         parseEventActionsList(CycleData, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus, Actions, CallbackForm);
-      {keepStatus, NewState} ->
-         dealEventCallbackRet(CycleData, CurStatus, NewState, CurStatus, Debug, LeftEvents, false);
-      {keepStatus, NewState, Actions} ->
-         parseEventActionsList(CycleData, CurStatus, NewState, CurStatus, Debug, LeftEvents, false, Actions, CallbackForm);
-      keepStatusState ->
-         dealEventCallbackRet(CycleData, CurStatus, CurState, CurStatus, Debug, LeftEvents, false);
-      {keepStatusState, Actions} ->
-         parseEventActionsList(CycleData, CurStatus, CurState, CurStatus, Debug, LeftEvents, false, Actions, CallbackForm);
-      {repeatStatus, NewState} ->
-         dealEventCallbackRet(CycleData, CurStatus, NewState, CurStatus, Debug, LeftEvents, true);
-      {repeatStatus, NewState, Actions} ->
-         parseEventActionsList(CycleData, CurStatus, NewState, CurStatus, Debug, LeftEvents, true, Actions, CallbackForm);
-      repeatStatusState ->
-         dealEventCallbackRet(CycleData, CurStatus, CurState, CurStatus, Debug, LeftEvents, true);
-      {repeatStatusState, Actions} ->
-         parseEventActionsList(CycleData, CurStatus, CurState, CurStatus, Debug, LeftEvents, true, Actions, CallbackForm);
-      stop ->
-         terminate(exit, normal, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents);
-      {stop, Reason} ->
-         terminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents);
-      {stop, Reason, NewState} ->
-         terminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, NewState, Debug, LeftEvents);
-      {stopReply, Reason, Replies} ->
-         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents, Replies);
-      {stopReply, Reason, Replies, NewState} ->
-         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, CurStatus, NewState, Debug, LeftEvents, Replies);
       {reply, Reply, NewState} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
-         receiveMsgWait(CycleData, CurStatus, NewState, NewDebug, false);
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
+         receiveMsgWait(CycleData, Module, CurStatus, NewState, NewDebug, false);
       {reply, Reply, NewState, Option} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
          case Option of
             hibernate ->
-               reLoopEntry(CycleData, CurStatus, NewState, NewDebug, true);
+               reLoopEntry(CycleData, Module, CurStatus, NewState, NewDebug, true);
             {doAfter, Args} ->
-               startAfterCall(CycleData, CurStatus, NewState, NewDebug, [], Args);
+               startAfterCall(CycleData, Module, CurStatus, NewState, NewDebug, [], Args);
             _Ret ->
-               terminate(error, {bad_reply_option, _Ret}, ?STACKTRACE(), CycleData, CurStatus, NewState, Debug, [])
+               terminate(error, {bad_reply, _Ret}, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, [])
          end;
       {sreply, Reply, NewStatus, NewState} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
-         dealEventCallbackRet(CycleData, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus);
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
+         dealEventCR(CycleData, Module, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus);
       {sreply, Reply, NewStatus, NewState, Actions} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
-         parseEventActionsList(CycleData, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus, Actions, CallbackForm);
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
+         parseEventAL(CycleData, Module, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus, Actions, CallbackForm);
+      {nextStatus, NewStatus, NewState} ->
+         dealEventCR(CycleData, Module, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus);
+      {nextStatus, NewStatus, NewState, Actions} ->
+         parseEventAL(CycleData, Module, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus, Actions, CallbackForm);
+      {keepStatus, NewState} ->
+         dealEventCR(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, false);
+      {keepStatus, NewState, Actions} ->
+         parseEventAL(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, false, Actions, CallbackForm);
+      keepStatusState ->
+         dealEventCR(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, false);
+      {keepStatusState, Actions} ->
+         parseEventAL(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, false, Actions, CallbackForm);
+      {repeatStatus, NewState} ->
+         dealEventCR(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, true);
+      {repeatStatus, NewState, Actions} ->
+         parseEventAL(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, true, Actions, CallbackForm);
+      repeatStatusState ->
+         dealEventCR(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, true);
+      {repeatStatusState, Actions} ->
+         parseEventAL(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, true, Actions, CallbackForm);
+      stop ->
+         terminate(exit, normal, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents);
+      {stop, Reason} ->
+         terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents);
+      {stop, Reason, NewState} ->
+         terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, LeftEvents);
+      {stopReply, Reason, Replies} ->
+         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Replies);
+      {stopReply, Reason, Replies, NewState} ->
+         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, LeftEvents, Replies);
       _ ->
-         terminate(error, {bad_return_from_status_function, Result}, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, LeftEvents)
+         terminate(error, {bad_handleEventCR, Result}, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
    end.
 
--compile({inline, [dealEnterCallbackRet/12]}).
-dealEnterCallbackRet(#cycleData{isEnter = IsEnter} = CycleData, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, IsCallEnter) ->
+dealEnterCR(#cycleData{isEnter = IsEnter} = CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, IsCallEnter) ->
    case IsEnter andalso IsCallEnter of
       true ->
-         startEnterCall(CycleData, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter);
+         startEnterCall(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter);
       false ->
-         performTransitions(CycleData, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter)
+         performTransitions(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter)
    end.
 
--compile({inline, [dealEventCallbackRet/7]}).
-dealEventCallbackRet(#cycleData{isEnter = IsEnter} = CycleData, CurStatus, CurState, NewStatus, Debug, LeftEvents, IsCallEnter) ->
+%% dealEventCallbackRet
+dealEventCR(#cycleData{isEnter = IsEnter} = CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, IsCallEnter) ->
    case IsEnter andalso IsCallEnter of
       true ->
-         startEnterCall(CycleData, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], [], false, false, false);
+         startEnterCall(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], [], false, false, false);
       false ->
-         performTransitions(CycleData, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], [], false, false, false)
+         performTransitions(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], [], false, false, false)
    end.
 
 %% 处理enter callback 动作列表
-parseEnterActionsList(CycleData, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsCallEnter, IsHibernate, DoAfter, Actions) ->
+%% parseEnterActionsList
+parseEnterAL(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsCallEnter, IsHibernate, DoAfter, Actions) ->
    %% enter 调用不能改成状态 actions 不能返回 IsPostpone = true 但是可以取消之前的推迟  设置IsPostpone = false 不能设置 doafter 不能插入事件
-   case loopParseActionsList(Actions, ?CB_FORM_ENTER, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents) of
-      {error, ErrorContent} ->
-         terminate(error, ErrorContent, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, []);
-      {NewCycleData, NewDebug, NewIsPostpone, NewIsHibernate, DoAfter, NewTimeouts, NextEvents} ->
-         case IsCallEnter andalso element(#cycleData.isEnter, NewCycleData) of
+   case Actions of
+      [] ->
+         case IsCallEnter andalso element(#cycleData.isEnter, CycleData) of
             true ->
-               startEnterCall(NewCycleData, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NextEvents, NewIsPostpone, NewIsHibernate, DoAfter);
+               startEnterCall(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter);
             _ ->
-               performTransitions(NewCycleData, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NextEvents, NewIsPostpone, NewIsHibernate, DoAfter)
+               performTransitions(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter)
+         end;
+      _ ->
+         case doParseAL(Actions, ?CB_FORM_ENTER, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents) of
+            {error, ErrorContent} ->
+               terminate(error, ErrorContent, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents);
+            {NewCycleData, NewDebug, NewIsPostpone, NewIsHibernate, DoAfter, NewTimeouts, NewNextEvents} ->
+               case IsCallEnter andalso element(#cycleData.isEnter, NewCycleData) of
+                  true ->
+                     startEnterCall(NewCycleData, Module, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NewNextEvents, NewIsPostpone, NewIsHibernate, DoAfter);
+                  _ ->
+                     performTransitions(NewCycleData, Module, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NewNextEvents, NewIsPostpone, NewIsHibernate, DoAfter)
+               end
          end
    end.
 
 %% 处理非 enter 或者after callback 返回的动作列表
-parseEventActionsList(CycleData, CurStatus, CurState, NewStatus, Debug, LeftEvents, IsCallEnter, Actions, CallbackForm) ->
-   case loopParseActionsList(Actions, CallbackForm, CycleData, Debug, false, false, false, [], []) of
-      {error, ErrorContent} ->
-         terminate(error, ErrorContent, ?STACKTRACE(), CycleData, CurStatus, CurState, Debug, []);
-      {NewCycleData, NewDebug, NewIsPostpone, NewIsHibernate, MewDoAfter, NewTimeouts, NewNextEvents} ->
-         case IsCallEnter andalso element(#cycleData.isEnter, NewCycleData) of
+%% parseEventActionsList
+parseEventAL(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, IsCallEnter, Actions, CallbackForm) ->
+   case Actions of
+      [] ->
+         case IsCallEnter andalso element(#cycleData.isEnter, CycleData) of
             true ->
-               startEnterCall(NewCycleData, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NewNextEvents, NewIsPostpone, NewIsHibernate, MewDoAfter);
+               startEnterCall(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], [], false, false, false);
             _ ->
-               performTransitions(NewCycleData, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NewNextEvents, NewIsPostpone, NewIsHibernate, MewDoAfter)
+               performTransitions(CycleData, Module, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], [], false, false, false)
+         end;
+      _ ->
+         case doParseAL(Actions, CallbackForm, CycleData, Debug, false, false, false, [], []) of
+            {error, ErrorContent} ->
+               terminate(error, ErrorContent, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, []);
+            {NewCycleData, NewDebug, NewIsPostpone, NewIsHibernate, MewDoAfter, NewTimeouts, NewNextEvents} ->
+               case IsCallEnter andalso element(#cycleData.isEnter, NewCycleData) of
+                  true ->
+                     startEnterCall(NewCycleData, Module, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NewNextEvents, NewIsPostpone, NewIsHibernate, MewDoAfter);
+                  _ ->
+                     performTransitions(NewCycleData, Module, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewTimeouts, NewNextEvents, NewIsPostpone, NewIsHibernate, MewDoAfter)
+               end
          end
    end.
 
-loopParseActionsList([], _CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents) ->
+%% loopParseActionsList
+doParseAL([], _CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents) ->
    {CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents};
-loopParseActionsList([OneAction | LeftActions], CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents) ->
+doParseAL([OneAction | LeftActions], CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents) ->
    case OneAction of
       {reply, From, Reply} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, {out, Reply, From}),
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, NewDebug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
-      {eTimeout, _Time, _TimeoutMsg, _Options} = ENewTVOpt ->
-         case checkTimeOptions(ENewTVOpt) of
-            error_timeout_opt ->
-               {error, {bad_eTimeout_action, ENewTVOpt}};
-            RetTV ->
-               loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [RetTV | Timeouts], NextEvents)
-         end;
-      {sTimeout, _Time, _TimeoutMsg, _Options} = SNewTVOpt ->
-         case checkTimeOptions(SNewTVOpt) of
-            error_timeout_opt ->
-               {error, {bad_sTimeout_action, SNewTVOpt}};
-            RetTV ->
-               loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [RetTV | Timeouts], NextEvents)
-         end;
-      {{gTimeout, _Name}, _Time, _TimeoutMsg, _Options} = GNewTVOpt ->
-         case checkTimeOptions(GNewTVOpt) of
-            error_timeout_opt ->
-               {error, {bad_gTimeout_action, GNewTVOpt}};
-            RetTV ->
-               loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [RetTV | Timeouts], NextEvents)
-         end;
-      {u_eTimeout, _TimeoutMsg} = UENewTV ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [UENewTV | Timeouts], NextEvents);
-      {u_sTimeout, _TimeoutMsg} = USNewTV ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [USNewTV | Timeouts], NextEvents);
-      {{u_gTimeout, _Name}, _TimeoutMsg} = UGNewTV ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [UGNewTV | Timeouts], NextEvents);
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
+         doParseAL(LeftActions, CallbackForm, CycleData, NewDebug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
+      {eTimeout, _Time, _TimeoutMsg} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
+      {sTimeout, _Time, _TimeoutMsg} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
+      {{gTimeout, _Name}, _Time, _TimeoutMsg} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
+      {eTimeout, _Time, _TimeoutMsg, _Options} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
+      {sTimeout, _Time, _TimeoutMsg, _Options} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
+      {{gTimeout, _Name}, _Time, _TimeoutMsg, _Options} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
+      {u_eTimeout, _TimeoutMsg} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
+      {u_sTimeout, _TimeoutMsg} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
+      {{u_gTimeout, _Name}, _TimeoutMsg} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
       c_eTimeout ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [c_eTimeout | Timeouts], NextEvents);
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
       c_sTimeout ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [c_sTimeout | Timeouts], NextEvents);
-      {c_gTimeout, _Name} = CGNewTV ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [CGNewTV | Timeouts], NextEvents);
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
+      {c_gTimeout, _Name} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [OneAction | Timeouts], NextEvents);
       {isEnter, IsEnter} when is_boolean(IsEnter) ->
          case element(#cycleData.isEnter, CycleData) of
             IsEnter ->
-               loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
+               doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
             _ ->
                NewCycleData = setelement(#cycleData.isEnter, CycleData, IsEnter),
-               loopParseActionsList(LeftActions, CallbackForm, NewCycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents)
+               NewDebug = ?SYS_DEBUG(Debug, CycleData, {change_isEnter, IsEnter}),
+               doParseAL(LeftActions, CallbackForm, NewCycleData, NewDebug, IsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents)
          end;
-      {isHibernate, NewIsHibernate} when is_boolean(NewIsHibernate) ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, NewIsHibernate, DoAfter, Timeouts, NextEvents);
-      {isPostpone, NewIsPostpone} when is_boolean(NewIsPostpone) andalso (not NewIsPostpone orelse CallbackForm == ?CB_FORM_EVENT) ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, NewIsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
+      {isHibernate, NewIsHibernate} ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, NewIsHibernate, DoAfter, Timeouts, NextEvents);
+      {isPostpone, NewIsPostpone} when (not NewIsPostpone orelse CallbackForm == ?CB_FORM_EVENT) ->
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, NewIsPostpone, IsHibernate, DoAfter, Timeouts, NextEvents);
       {doAfter, Args} when CallbackForm == ?CB_FORM_EVENT ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, {true, Args}, Timeouts, NextEvents);
-      {eTimeout, Time, _TimeoutMsg} = ENewTV when ?REL_TIMEOUT(Time) ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [ENewTV | Timeouts], NextEvents);
-      {sTimeout, Time, _TimeoutMsg} = SNewTV when ?REL_TIMEOUT(Time) ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [SNewTV | Timeouts], NextEvents);
-      {{gTimeout, _Name}, Time, _TimeoutMsg} = GNewTV when ?REL_TIMEOUT(Time) ->
-         loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, [GNewTV | Timeouts], NextEvents);
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, {true, Args}, Timeouts, NextEvents);
       {nextEvent, Type, Content} when CallbackForm == ?CB_FORM_EVENT orelse CallbackForm == ?CB_FORM_AFTER ->
          %% 处理next_event动作
-         case isEventType(Type) of
-            true ->
-               loopParseActionsList(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, [{Type, Content} | NextEvents]);
-            _ ->
-               {error, {bad_next_event, Type, Content}}
-         end;
-      _ActRet ->
-         {error, {bad_action_type, _ActRet}}
+         doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPostpone, IsHibernate, DoAfter, Timeouts, [{Type, Content} | NextEvents]);
+      _ ->
+         {error, {bad_ActionType, OneAction}}
    end.
 
-checkTimeOptions({TimeoutType, Time, TimeoutMsg, Options} = NewTV) ->
-   case Options of
-      [{abs, true}] when ?ABS_TIMEOUT(Time) ->
-         NewTV;
-      [{abs, false}] when ?REL_TIMEOUT(Time) ->
-         {TimeoutType, Time, TimeoutMsg};
-      [] when ?REL_TIMEOUT(Time) ->
-         {TimeoutType, Time, TimeoutMsg};
-      _ ->
-         %% 如果将来 start_timer opt扩展了 这里的代码也要修改
-         error_timeout_opt
-   end.
+% checkTimeOptions({TimeoutType, Time, TimeoutMsg, Options} = NewTV) ->
+%    case Options of
+%       [{abs, true}] when ?ABS_TIMEOUT(Time) ->
+%          NewTV;
+%       [{abs, false}] when ?REL_TIMEOUT(Time) ->
+%          {TimeoutType, Time, TimeoutMsg};
+%       [] when ?REL_TIMEOUT(Time) ->
+%          {TimeoutType, Time, TimeoutMsg};
+%       _ ->
+%          %% 如果将来 start_timer opt扩展了 这里的代码也要修改
+%          error_timeout_opt
+%    end.
 
 %% 进行状态转换
-performTransitions(#cycleData{postponed = Postponed, timers = Timers} = CycleData, CurStatus, CurState, NewStatus, Debug, [Event | LeftEvents], Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter) ->
+performTransitions(#cycleData{postponed = Postponed, timers = Timers} = CycleData, Module, CurStatus, CurState, NewStatus, Debug, [CurEvent | LeftEvents], Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter) ->
    %% 已收集所有选项，并缓冲next_events。执行实际状态转换。如果推迟则将当前事件移至推迟
    %% 此时 Timeouts, NextEvents的顺序与最开始出现的顺序相反. 后面执行的顺序 超时添加和更新 + 零超时 + 当前事件 + 反序的Postpone事件 + LeftEvent  %% TODO 测试验证
-   NewDebug = ?SYS_DEBUG(Debug, case IsPostpone of true -> {postpone, Event, CurStatus, NewStatus}; _ -> {consume, Event, NewStatus, NewStatus} end),
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, case IsPostpone of true -> {postpone, CurEvent, CurStatus, NewStatus}; _ ->
+      {consume, CurEvent, NewStatus, NewStatus} end),
    if
       CurStatus =:= NewStatus ->
          %% Cancel event timeout
@@ -1635,10 +1671,10 @@ performTransitions(#cycleData{postponed = Postponed, timers = Timers} = CycleDat
             end,
          if
             IsPostpone ->
-               NewCycleData = setelement(#cycleData.postponed, CycleData, [Event | Postponed]),
-               performTimeouts(NewCycleData, NewStatus, CurState, NewDebug, LeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter);
+               NewCycleData = setelement(#cycleData.postponed, CycleData, [CurEvent | Postponed]),
+               performTimeouts(NewCycleData, Module, NewStatus, CurState, NewDebug, LeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter);
             true ->
-               performTimeouts(CycleData, NewStatus, CurState, NewDebug, LeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter)
+               performTimeouts(CycleData, Module, NewStatus, CurState, NewDebug, LeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter)
          end;
       true ->
          %% 取消 status and event timeout
@@ -1668,15 +1704,15 @@ performTransitions(#cycleData{postponed = Postponed, timers = Timers} = CycleDat
                NewLeftEvents =
                   case Postponed of
                      [] ->
-                        [Event | LeftEvents];
+                        [CurEvent | LeftEvents];
                      [E1] ->
-                        [E1, Event | LeftEvents];
+                        [E1, CurEvent | LeftEvents];
                      [E2, E1] ->
-                        [E1, E2, Event | LeftEvents];
+                        [E1, E2, CurEvent | LeftEvents];
                      _ ->
-                        lists:reverse(Postponed, [Event | LeftEvents])
+                        lists:reverse(Postponed, [CurEvent | LeftEvents])
                   end,
-               performTimeouts(NewCycleData, NewStatus, CurState, NewDebug, NewLeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter);
+               performTimeouts(NewCycleData, Module, NewStatus, CurState, NewDebug, NewLeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter);
             true ->
                NewLeftEvents =
                   case Postponed of
@@ -1689,12 +1725,12 @@ performTransitions(#cycleData{postponed = Postponed, timers = Timers} = CycleDat
                      _ ->
                         lists:reverse(Postponed, LeftEvents)
                   end,
-               performTimeouts(NewCycleData, NewStatus, CurState, NewDebug, NewLeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter)
+               performTimeouts(NewCycleData, Module, NewStatus, CurState, NewDebug, NewLeftEvents, Timeouts, NextEvents, LastTimers, IsHibernate, DoAfter)
          end
    end.
 
 %% 通过超时和插入事件的处理继续状态转换
-performTimeouts(#cycleData{timers = OldTimer} = CycleData, CurStatus, CurState, Debug, LeftEvents, Timeouts, NextEvents, CurTimers, IsHibernate, DoAfter) ->
+performTimeouts(#cycleData{timers = OldTimer} = CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Timeouts, NextEvents, CurTimers, IsHibernate, DoAfter) ->
    TemLastEvents =
       case NextEvents of
          [] ->
@@ -1710,73 +1746,73 @@ performTimeouts(#cycleData{timers = OldTimer} = CycleData, CurStatus, CurState, 
       [] ->
          case OldTimer =:= CurTimers of
             true ->
-               performEvents(CycleData, CurStatus, CurState, Debug, TemLastEvents, IsHibernate, DoAfter);
+               performEvents(CycleData, Module, CurStatus, CurState, Debug, TemLastEvents, IsHibernate, DoAfter);
             _ ->
                NewCycleData = setelement(#cycleData.timers, CycleData, CurTimers),
-               performEvents(NewCycleData, CurStatus, CurState, Debug, TemLastEvents, IsHibernate, DoAfter)
+               performEvents(NewCycleData, Module, CurStatus, CurState, Debug, TemLastEvents, IsHibernate, DoAfter)
          end;
       _ ->
-         %% 下面执行 loopTimeoutList 时 列表顺序跟最开始的是发的
-         {NewTimers, TimeoutEvents, NewDebug} = loopTimeoutsList(lists:reverse(Timeouts), CurTimers, [], Debug),
+         %% 下面执行 loopTimeoutList 时 列表顺序跟最开始的是反的
+         {NewTimers, TimeoutEvents, NewDebug} = loopTimeoutsList(lists:reverse(Timeouts), CurTimers, CycleData, Debug, []),
          case TimeoutEvents of
             [] ->
                case OldTimer =:= NewTimers of
                   true ->
-                     performEvents(CycleData, CurStatus, CurState, NewDebug, TemLastEvents, IsHibernate, DoAfter);
+                     performEvents(CycleData, Module, CurStatus, CurState, NewDebug, TemLastEvents, IsHibernate, DoAfter);
                   _ ->
                      NewCycleData = setelement(#cycleData.timers, CycleData, NewTimers),
-                     performEvents(NewCycleData, CurStatus, CurState, NewDebug, TemLastEvents, IsHibernate, DoAfter)
+                     performEvents(NewCycleData, Module, CurStatus, CurState, NewDebug, TemLastEvents, IsHibernate, DoAfter)
                end;
             _ ->
-               {LastEvents, LastDebug} = mergeTimeoutEvents(TimeoutEvents, CurStatus, NewDebug, TemLastEvents),
+               {LastEvents, LastDebug} = mergeTimeoutEvents(TimeoutEvents, CurStatus, CycleData, NewDebug, TemLastEvents),
                case OldTimer =:= NewTimers of
                   true ->
-                     performEvents(CycleData, CurStatus, CurState, LastDebug, LastEvents, IsHibernate, DoAfter);
+                     performEvents(CycleData, Module, CurStatus, CurState, LastDebug, LastEvents, IsHibernate, DoAfter);
                   _ ->
                      NewCycleData = setelement(#cycleData.timers, CycleData, NewTimers),
-                     performEvents(NewCycleData, CurStatus, CurState, LastDebug, LastEvents, IsHibernate, DoAfter)
+                     performEvents(NewCycleData, Module, CurStatus, CurState, LastDebug, LastEvents, IsHibernate, DoAfter)
                end
          end
    end.
 
-loopTimeoutsList([], Timers, TimeoutEvents, Debug) ->
+loopTimeoutsList([], Timers, _CycleData, Debug, TimeoutEvents) ->
    {Timers, TimeoutEvents, Debug};
-loopTimeoutsList([OneTimeout | LeftTimeouts], Timers, TimeoutEvents, Debug) ->
+loopTimeoutsList([OneTimeout | LeftTimeouts], Timers, CycleData, Debug, TimeoutEvents) ->
    case OneTimeout of
       {TimeoutType, Time, TimeoutMsg, Options} ->
          case Time of
             infinity ->
                NewTimers = doCancelTimer(TimeoutType, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, TimeoutEvents, Debug);
-            0 when Options =:= [] ->
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents);
+            0 ->
                NewTimers = doCancelTimer(TimeoutType, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, [{TimeoutType, TimeoutMsg} | TimeoutEvents], Debug);
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, [{TimeoutType, TimeoutMsg} | TimeoutEvents]);
             _ ->
                TimerRef = erlang:start_timer(Time, self(), TimeoutType, Options),
-               NewDebug = ?SYS_DEBUG(Debug, {start_timer, {TimeoutType, Time, TimeoutMsg, Options}}),
+               NewDebug = ?SYS_DEBUG(Debug, CycleData, {start_timer, {TimeoutType, Time, TimeoutMsg, Options}}),
                NewTimers = doRegisterTimer(TimeoutType, TimerRef, TimeoutMsg, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, TimeoutEvents, NewDebug)
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, NewDebug, TimeoutEvents)
          end;
       {TimeoutType, Time, TimeoutMsg} ->
          case Time of
             infinity ->
                NewTimers = doCancelTimer(TimeoutType, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, TimeoutEvents, Debug);
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents);
             0 ->
                NewTimers = doCancelTimer(TimeoutType, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, [{TimeoutType, TimeoutMsg} | TimeoutEvents], Debug);
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, [{TimeoutType, TimeoutMsg} | TimeoutEvents]);
             _ ->
                TimerRef = erlang:start_timer(Time, self(), TimeoutType),
-               NewDebug = ?SYS_DEBUG(Debug, {start_timer, {TimeoutType, Time, TimeoutMsg, []}}),
+               NewDebug = ?SYS_DEBUG(Debug, CycleData, {start_timer, {TimeoutType, Time, TimeoutMsg, []}}),
                NewTimers = doRegisterTimer(TimeoutType, TimerRef, TimeoutMsg, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, TimeoutEvents, NewDebug)
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, NewDebug, TimeoutEvents)
          end;
       {UpdateTimeoutType, NewTimeoutMsg} ->
          NewTimers = doUpdateTimer(UpdateTimeoutType, NewTimeoutMsg, Timers),
-         loopTimeoutsList(LeftTimeouts, NewTimers, TimeoutEvents, Debug);
+         loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents);
       CancelTimeoutType ->
          NewTimers = doCancelTimer(CancelTimeoutType, Timers),
-         loopTimeoutsList(LeftTimeouts, NewTimers, TimeoutEvents, Debug)
+         loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents)
    end.
 
 doRegisterTimer(TimeoutType, NewTimerRef, TimeoutMsg, Timers) ->
@@ -1804,7 +1840,6 @@ doUpdateTimer(TimeoutType, Timers, TimeoutMsg) ->
          Timers
    end.
 
--compile({inline, [cancelTimer/3]}).
 cancelTimer(TimeoutType, TimerRef, Timers) ->
    case erlang:cancel_timer(TimerRef) of
       false ->
@@ -1830,19 +1865,19 @@ cancelTimer(TimeoutType, TimerRef, Timers) ->
 %% 在事件计时器超时0事件之后发生的事件被认为是
 %% 属于在事件计时器之后启动的计时器
 %% 已触发超时0事件，因此它们不会取消事件计时器。
-mergeTimeoutEvents([], _Status, Debug, Events) ->
+mergeTimeoutEvents([], _Status, _CycleData, Debug, Events) ->
    {Events, Debug};
-mergeTimeoutEvents([{eTimeout, _} = TimeoutEvent | TimeoutEvents], Status, Debug, []) ->
+mergeTimeoutEvents([{eTimeout, _} = TimeoutEvent | TimeoutEvents], Status, CycleData, Debug, []) ->
    %% 由于队列中没有其他事件，因此添加该事件零超时事件
-   NewDebug = ?SYS_DEBUG(Debug, {insert_timeout, TimeoutEvent, Status}),
-   mergeTimeoutEvents(TimeoutEvents, Status, NewDebug, [TimeoutEvent]);
-mergeTimeoutEvents([{eTimeout, _} | TimeoutEvents], Status, Debug, Events) ->
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {insert_timeout, TimeoutEvent, Status}),
+   mergeTimeoutEvents(TimeoutEvents, Status, CycleData, NewDebug, [TimeoutEvent]);
+mergeTimeoutEvents([{eTimeout, _} | TimeoutEvents], Status, CycleData, Debug, Events) ->
    %% 忽略，因为队列中还有其他事件，因此它们取消了事件超时0。
-   mergeTimeoutEvents(TimeoutEvents, Status, Debug, Events);
-mergeTimeoutEvents([TimeoutEvent | TimeoutEvents], Status, Debug, Events) ->
+   mergeTimeoutEvents(TimeoutEvents, Status, CycleData, Debug, Events);
+mergeTimeoutEvents([TimeoutEvent | TimeoutEvents], Status, CycleData, Debug, Events) ->
    %% Just prepend all others
-   NewDebug = ?SYS_DEBUG(Debug, {insert_timeout, TimeoutEvent, Status}),
-   mergeTimeoutEvents(TimeoutEvents, Status, NewDebug, [TimeoutEvent | Events]).
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {insert_timeout, TimeoutEvent, Status}),
+   mergeTimeoutEvents(TimeoutEvents, Status, CycleData, NewDebug, [TimeoutEvent | Events]).
 
 %% Return a list of all pending timeouts
 list_timeouts(Timers) ->
@@ -1854,16 +1889,16 @@ list_timeouts(Timers) ->
 %%---------------------------------------------------------------------------
 
 %% 状态转换已完成，如果有排队事件，则继续循环，否则获取新事件
-performEvents(CycleData, CurStatus, CurState, Debug, LeftEvents, IsHibernate, DoAfter) ->
+performEvents(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, IsHibernate, DoAfter) ->
 %  io:format("loop_done: status_data = ~p ~n postponed = ~p  LeftEvents = ~p ~n timers = ~p.~n", [S#status.status_data,,S#status.postponed,LeftEvents,S#status.timers]),
    case DoAfter of
       {true, Args} ->
          %% 这里 IsHibernate设置会被丢弃 按照gen_server中的设计 continue 和 hiernate是互斥的
-         startAfterCall(CycleData, CurStatus, CurState, Debug, LeftEvents, Args);
+         startAfterCall(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Args);
       _ ->
          case LeftEvents of
             [] ->
-               reLoopEntry(CycleData, CurStatus, CurState, Debug, IsHibernate);
+               reLoopEntry(CycleData, Module, CurStatus, CurState, Debug, IsHibernate);
             [Event | _Events] ->
                %% 循环直到没有排队事件
                if
@@ -1873,14 +1908,14 @@ performEvents(CycleData, CurStatus, CurState, Debug, LeftEvents, IsHibernate, Do
                   true ->
                      ignore
                end,
-               startEventCall(CycleData, CurStatus, CurState, Debug, LeftEvents, Event)
+               startEventCall(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Event)
          end
    end.
 
-replyThenTerminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, Debug, LeftEvents, Replies) ->
-   NewDebug = ?SYS_DEBUG(Debug, {out, Replies}),
+replyThenTerminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Replies) ->
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Replies}),
    try
-      terminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, NewDebug, LeftEvents)
+      terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, LeftEvents)
    after
       case Replies of
          {reply, From, Reply} ->
@@ -1890,7 +1925,7 @@ replyThenTerminate(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, De
       end
    end.
 
-terminate(Class, Reason, Stacktrace, #cycleData{module = Module} = CycleData, CurStatus, CurState, Debug, LeftEvents) ->
+terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents) ->
    epmStopAll(),
    case erlang:function_exported(Module, terminate, 3) of
       true ->
@@ -1899,7 +1934,7 @@ terminate(Class, Reason, Stacktrace, #cycleData{module = Module} = CycleData, Cu
          catch
             throw:_ -> ok;
             C:R:ST ->
-               error_info(C, R, ST, CycleData, CurStatus, CurState, Debug, LeftEvents),
+               error_info(C, R, ST, CycleData, Module, CurStatus, CurState, Debug, LeftEvents),
                erlang:raise(C, R, ST)
          end;
       false ->
@@ -1907,13 +1942,13 @@ terminate(Class, Reason, Stacktrace, #cycleData{module = Module} = CycleData, Cu
    end,
    case Reason of
       normal ->
-         ?SYS_DEBUG(Debug, {terminate, Reason, CurStatus});
+         ?SYS_DEBUG(Debug, CycleData, {terminate, Reason, CurStatus});
       shutdown ->
-         ?SYS_DEBUG(Debug, {terminate, Reason, CurStatus});
+         ?SYS_DEBUG(Debug, CycleData, {terminate, Reason, CurStatus});
       {shutdown, _} ->
-         ?SYS_DEBUG(Debug, {terminate, Reason, CurStatus});
+         ?SYS_DEBUG(Debug, CycleData, {terminate, Reason, CurStatus});
       _ ->
-         error_info(Class, Reason, Stacktrace, CycleData, CurStatus, CurState, Debug, LeftEvents)
+         error_info(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
    end,
    case Stacktrace of
       [] ->
@@ -1922,16 +1957,16 @@ terminate(Class, Reason, Stacktrace, #cycleData{module = Module} = CycleData, Cu
          erlang:raise(Class, Reason, Stacktrace)
    end.
 
-error_info(Class, Reason, Stacktrace, #cycleData{isEnter = IsEnter, postponed = Postponed, timers = Timers} = CycleData, CurStatus, CurState, Debug, LeftEvents) ->
+error_info(Class, Reason, Stacktrace, #cycleData{name = Name, isEnter = IsEnter, postponed = Postponed, timers = Timers} = CycleData, Module, CurStatus, CurState, Debug, LeftEvents) ->
    Log = sys:get_log(Debug),
    ?LOG_ERROR(
       #{
          label => {gen_ipc, terminate},
-         name => getProName(),
+         name => Name,
          queue => LeftEvents,
          postponed => Postponed,
          isEnter => IsEnter,
-         status => format_status(terminate, get(), CycleData, CurStatus, CurState),
+         status => format_status(terminate, get(), CycleData, Module, CurStatus, CurState),
          timeouts => list_timeouts(Timers),
          log => Log,
          reason => {Class, Reason, Stacktrace},
@@ -2073,7 +2108,7 @@ format_client_log({_Pid, {Name, Stacktrace}}) ->
    "** ~tp~n", [Name, error_logger:limit_term(Stacktrace)]}.
 
 %% Call Module:format_status/2 or return a default value
-format_status(Opt, PDict, #cycleData{module = Module}, CurStatus, CurState) ->
+format_status(Opt, PDict, _CycleData, Module, CurStatus, CurState) ->
    case erlang:function_exported(Module, format_status, 2) of
       true ->
          try Module:formatStatus(Opt, [PDict, CurStatus, CurState])
@@ -2139,18 +2174,6 @@ event_string(Event) ->
    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 进程字典操作函数 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-setParent(Parent) ->
-   erlang:put(?PD_PARENT, Parent).
-
-getParent() ->
-   erlang:get(?PD_PARENT).
-
-setProName(Name) ->
-   erlang:put(?PD_PRO_NAME, Name).
-
-getProName() ->
-   erlang:get(?PD_PRO_NAME).
-
 setEpmList(EpmList) ->
    erlang:put(?PD_EPM_LIST, EpmList).
 
