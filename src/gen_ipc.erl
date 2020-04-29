@@ -19,10 +19,12 @@
    , reply/1, reply/2
 
    %% API for gen_event behaviour
-   , infoNotify/2, callNotify/2
-   , epmCall/3, epmCall/4, epmInfo/3
-   , addEpm/3, addSupEpm/3, whichEpm/1
-   , deleteEpm/3, swapEpm/3, swapSupEpm/3
+   , send_request/3
+   , info_notify/2, call_notify/2
+   , epm_call/3, epm_call/4, epm_info/3
+   , add_epm/3, del_epm/3, add_sup_epm/3
+   , swap_epm/3, swap_sup_epm/3
+   , which_epm/1
 
    %% gen callbacks
    , init_it/6
@@ -36,21 +38,16 @@
    , format_status/2
 
    %% Internal callbacks
-   , wakeup_from_hibernate/6
+   , wakeupFromHib/6
    %% logger callback
    , format_log/1
+   , format_log/2
    , epm_log/1
 ]).
 
-%% 进程字典的宏定义
--define(PD_PARENT, '$pd_parent').
--define(PD_PRO_NAME, '$pd_proname').
--define(PD_EPM_FLAG, '$pd_epmFlag').
--define(PD_EPM_LIST, '$pd_epmList').
-
-%% timeout相关宏定义
--define(REL_TIMEOUT(T), ((is_integer(T) andalso (T) >= 0) orelse (T) =:= infinity)).
--define(ABS_TIMEOUT(T), (is_integer(T) orelse (T) =:= infinity)).
+% %% timeout相关宏定义
+% -define(REL_TIMEOUT(T), ((is_integer(T) andalso (T) >= 0) orelse (T) =:= infinity)).
+% -define(ABS_TIMEOUT(T), (is_integer(T) orelse (T) =:= infinity)).
 
 -define(STACKTRACE(), element(2, erlang:process_info(self(), current_stacktrace))).
 
@@ -111,86 +108,86 @@
 eventAction().
 
 -type eventAction() ::
-{'doAfter', Args :: term()} |                                           % 设置执行某事件后是否回调 handleAfter
-{'isPostpone', Bool :: isPostpone()} |                                  % 设置推迟选项
-{'nextEvent', EventType :: eventType(), EventContent :: term()} |       % 插入事件作为下一个处理
-commonAction().
+   {'doAfter', Args :: term()} |                                           % 设置执行某事件后是否回调 handleAfter
+   {'isPostpone', Bool :: isPostpone()} |                                  % 设置推迟选项
+   {'nextEvent', EventType :: eventType(), EventContent :: term()} |       % 插入事件作为下一个处理
+   commonAction().
 
 -type afterAction() ::
-{'nextEvent', EventType :: eventType(), EventContent :: term()} |       % 插入事件作为下一个处理
-commonAction().
+   {'nextEvent', EventType :: eventType(), EventContent :: term()} |       % 插入事件作为下一个处理
+   commonAction().
 
 -type enterAction() ::
-{'isPostpone', false} |                                                  % 虽然enter action 不能设置postpone 但是可以取消之前event的设置
-commonAction().
+   {'isPostpone', false} |                                                  % 虽然enter action 不能设置postpone 但是可以取消之前event的设置
+   commonAction().
 
 -type commonAction() ::
-{'isEnter', Bool :: isEnter()} |
-{'isHibernate', Bool :: isHibernate()} |
-timeoutAction() |
-replyAction().
+   {'isEnter', Bool :: isEnter()} |
+   {'isHibernate', Bool :: isHibernate()} |
+   timeoutAction() |
+   replyAction().
 
 -type timeoutAction() ::
-timeoutNewAction() |
-timeoutCancelAction() |
-timeoutUpdateAction().
+   timeoutNewAction() |
+   timeoutCancelAction() |
+   timeoutUpdateAction().
 
 -type timeoutNewAction() ::
-{'eTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the event_timeout option
-{'eTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |                          % Set the event_timeout option
-{{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term()} |                                        % Set the generic_timeout option
-{{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |        % Set the generic_timeout option
-{'sTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the status_timeout option
-{'sTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])}.                           % Set the status_timeout option
+   {'eTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the event_timeout option
+   {'eTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |                          % Set the event_timeout option
+   {{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term()} |                                        % Set the generic_timeout option
+   {{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |        % Set the generic_timeout option
+   {'sTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the status_timeout option
+   {'sTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])}.                           % Set the status_timeout option
 
 -type timeoutCancelAction() ::
-'c_eTimeout' |                                                                                                      % 不可能也不需要更新此超时，因为任何其他事件都会自动取消它。
-{'c_gTimeout', Name :: term()} |
-'c_sTimeout'.
+   'c_eTimeout' |                                                                                                      % 不可能也不需要更新此超时，因为任何其他事件都会自动取消它。
+   {'c_gTimeout', Name :: term()} |
+   'c_sTimeout'.
 
 -type timeoutUpdateAction() ::
-{'u_eTimeout', EventContent :: term()} |                                                                            % 不可能也不需要取消此超时，因为任何其他事件都会自动取消它。
-{{'u_gTimeout', Name :: term()}, EventContent :: term()} |
-{'u_sTimeout', EventContent :: term()}.
+   {'u_eTimeout', EventContent :: term()} |                                                                            % 不可能也不需要取消此超时，因为任何其他事件都会自动取消它。
+   {{'u_gTimeout', Name :: term()}, EventContent :: term()} |
+   {'u_sTimeout', EventContent :: term()}.
 
 -type replyAction() ::
-{'reply', From :: from(), Reply :: term()}.
+   {'reply', From :: from(), Reply :: term()}.
 
 -type eventCallbackResult() ::
-{'reply', Reply :: term(), NewState :: term()} |                                                                    % 用作gen_server模式时快速响应进入消息接收
-{'sreply', Reply :: term(), NextStatus :: term(), NewState :: term()} |                                             % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
-{'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
-{'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |                            % 用作gen_server模式时快速响应进入消息接收
-{'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |            % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
-{'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                                           % 用作gen_server模式时快速响应进入循环
-{'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
-{'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |                         % Status transition, maybe to the same status
-commonCallbackResult(eventAction()).
+   {'reply', Reply :: term(), NewState :: term()} |                                                                    % 用作gen_server模式时快速响应进入消息接收
+   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term()} |                                             % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
+   {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
+   {'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |                            % 用作gen_server模式时快速响应进入消息接收
+   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |            % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
+   {'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                                           % 用作gen_server模式时快速响应进入循环
+   {'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
+   {'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |                         % Status transition, maybe to the same status
+   commonCallbackResult(eventAction()).
 
 -type afterCallbackResult() ::
-{'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
-{'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [afterAction(), ...]} |                         % Status transition, maybe to the same status
-{'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
-{'noreply', NewState :: term(), Options :: hibernate} |                                                             % 用作gen_server模式时快速响应进入消息接收
-commonCallbackResult(afterAction()).
+   {'nextStatus', NextStatus :: term(), NewState :: term()} |                                                          % {next_status,NextStatus,NewData,[]}
+   {'nextStatus', NextStatus :: term(), NewState :: term(), Actions :: [afterAction(), ...]} |                         % Status transition, maybe to the same status
+   {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
+   {'noreply', NewState :: term(), Options :: hibernate} |                                                             % 用作gen_server模式时快速响应进入消息接收
+   commonCallbackResult(afterAction()).
 
 -type enterCallbackResult() ::
-commonCallbackResult(enterAction()).
+   commonCallbackResult(enterAction()).
 
 -type commonCallbackResult(ActionType) ::
-{'keepStatus', NewState :: term()} |                                                                                % {keep_status,NewData,[]}
-{'keepStatus', NewState :: term(), Actions :: [ActionType]} |                                                       % Keep status, change data
-'keepStatusState' |                                                                                                 % {keep_status_and_data,[]}
-{'keepStatusState', Actions :: [ActionType]} |                                                                      % Keep status and data -> only actions
-{'repeatStatus', NewState :: term()} |                                                                              % {repeat_status,NewData,[]}
-{'repeatStatus', NewState :: term(), Actions :: [ActionType]} |                                                     % Repeat status, change data
-'repeatStatusState' |                                                                                               % {repeat_status_and_data,[]}
-{'repeatStatusState', Actions :: [ActionType]} |                                                                    % Repeat status and data -> only actions
-'stop' |                                                                                                            % {stop,normal}
-{'stop', Reason :: term()} |                                                                                        % Stop the server
-{'stop', Reason :: term(), NewState :: term()} |                                                                    % Stop the server
-{'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...]} |                                  % Reply then stop the server
-{'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...], NewState :: term()}.               % Reply then stop the server
+   {'keepStatus', NewState :: term()} |                                                                                % {keep_status,NewData,[]}
+   {'keepStatus', NewState :: term(), Actions :: [ActionType]} |                                                       % Keep status, change data
+   'keepStatusState' |                                                                                                 % {keep_status_and_data,[]}
+   {'keepStatusState', Actions :: [ActionType]} |                                                                      % Keep status and data -> only actions
+   {'repeatStatus', NewState :: term()} |                                                                              % {repeat_status,NewData,[]}
+   {'repeatStatus', NewState :: term(), Actions :: [ActionType]} |                                                     % Repeat status, change data
+   'repeatStatusState' |                                                                                               % {repeat_status_and_data,[]}
+   {'repeatStatusState', Actions :: [ActionType]} |                                                                    % Repeat status and data -> only actions
+   'stop' |                                                                                                            % {stop,normal}
+   {'stop', Reason :: term()} |                                                                                        % Stop the server
+   {'stop', Reason :: term(), NewState :: term()} |                                                                    % Stop the server
+   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...]} |                                  % Reply then stop the server
+   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...], NewState :: term()}.               % Reply then stop the server
 
 %% 状态机的初始化功能函数
 %% 如果要模拟gen_server init返回定时时间 可以在Actions返回定时动作
@@ -262,15 +259,15 @@ commonCallbackResult(enterAction()).
    PDict :: [{Key :: term(), Value :: term()}].
 
 -optional_callbacks([
-formatStatus/2
-, terminate/3
-, code_change/4
-, handleEnter/3
-, handleAfter/3
-, handleOnevent/4
-, handleEpmEvent/3
-, handleEpmCall/3
-, handleEpmInfo/3
+   formatStatus/2
+   , terminate/3
+   , code_change/4
+   , handleEnter/3
+   , handleAfter/3
+   , handleOnevent/4
+   , handleEpmEvent/3
+   , handleEpmCall/3
+   , handleEpmInfo/3
 ]).
 
 -record(cycleData, {
@@ -280,15 +277,14 @@ formatStatus/2
    , hibernateAfter = infinity :: timeout()
    , postponed = [] :: [{eventType(), term()}]
    , timers = #{} :: #{TimeoutType :: timeoutEventType() => {TimerRef :: reference(), TimeoutMsg :: term()}}
-   , epmList = []
-   , epmHer = #{}
+   , epmHers = #{}
 }).
 
 -record(epmHer, {
+   epmId = undefined :: term(),
    epmM :: atom(),
-   epmId = false,
-   epmS :: term(),
-   epmSup = false :: 'false' | pid()
+   epmSup = undefined :: 'undefined' | pid(),
+   epmS :: term()
 }).
 
 % isEventType(Type) ->
@@ -306,31 +302,31 @@ formatStatus/2
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% start stop API start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -type serverName() ::
-{'local', atom()} |
-{'global', GlobalName :: term()} |
-{'via', RegMod :: module(), Name :: term()}.
+   {'local', atom()} |
+   {'global', GlobalName :: term()} |
+   {'via', RegMod :: module(), Name :: term()}.
 
 -type serverRef() ::
-pid()   |
-(LocalName :: atom()) |
-{Name :: atom(), Node :: atom()} |
-{'global', GlobalName :: term()} |
-{'via', RegMod :: module(), ViaName :: term()}.
+   pid()   |
+   (LocalName :: atom()) |
+   {Name :: atom(), Node :: atom()} |
+   {'global', GlobalName :: term()} |
+   {'via', RegMod :: module(), ViaName :: term()}.
 
 -type startOpt() ::
-{'timeout', Time :: timeout()} |
-{'spawn_opt', [proc_lib:spawn_option()]} |
-enterLoopOpt().
+   {'timeout', Time :: timeout()} |
+   {'spawn_opt', [proc_lib:spawn_option()]} |
+   enterLoopOpt().
 
 -type enterLoopOpt() ::
-{'debug', Debugs :: [sys:debug_option()]} |
-{'hibernate_after', HibernateAfterTimeout :: timeout()}.
+   {'debug', Debugs :: [sys:debug_option()]} |
+   {'hibernate_after', HibernateAfterTimeout :: timeout()}.
 
 -type startRet() ::
-'ignore' |
-{'ok', pid()} |
-{'ok', {pid(), reference()}} |
-{'error', term()}.
+   'ignore' |
+   {'ok', pid()} |
+   {'ok', {pid(), reference()}} |
+   {'error', term()}.
 
 -spec start(Module :: module(), Args :: term(), Opts :: [startOpt()]) -> startRet().
 start(Module, Args, Opts) ->
@@ -462,9 +458,9 @@ system_continue(Parent, Debug, {CycleData, Module, CurStatus, CurState, IsHibern
    NewCycleData = updateParent(Parent, CycleData),
    if
       IsHibernate ->
-         proc_lib:hibernate(?MODULE, wakeup_from_hibernate, [NewCycleData, Module, CurStatus, CurState, Debug, IsHibernate]);
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [NewCycleData, Module, CurStatus, CurState, Debug, IsHibernate]);
       true ->
-         receiveMsgWait(NewCycleData, Module, CurStatus, CurState, Debug, IsHibernate)
+         receiveIng(NewCycleData, Module, CurStatus, CurState, Debug, IsHibernate)
    end.
 
 system_terminate(Reason, Parent, Debug, {CycleData, Module, CurStatus, CurState, _IsHibernate}) ->
@@ -492,7 +488,7 @@ system_replace_state(StatusFun, {CycleData, Module, CurStatus, CurState, IsHiber
    {ok, {NewStatus, NewState}, {CycleData, Module, NewStatus, NewState, IsHibernate}}.
 
 format_status(Opt, [PDict, SysStatus, Parent, Debug, {#cycleData{name = Name, timers = Timers, postponed = Postponed} = CycleData, Module, CurStatus, CurState, _IsHibernate}]) ->
-   Header = gen:format_status_header("Status for status machine", Name),
+   Header = gen:format_status_header("Status for gen_ipc", Name),
    NewCycleData = updateParent(Parent, CycleData),
    Log = sys:get_log(Debug),
    [
@@ -501,7 +497,7 @@ format_status(Opt, [PDict, SysStatus, Parent, Debug, {#cycleData{name = Name, ti
          [
             {"Status", SysStatus},
             {"Parent", Parent},
-            {"Time-outs", list_timeouts(Timers)},
+            {"Time-outs", listTimeouts(Timers)},
             {"Logged Events", Log},
             {"Postponed", Postponed}
          ]
@@ -523,7 +519,7 @@ call(ServerRef, Request) ->
          erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, Stacktrace)
    end.
 
--spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout() |{'cleanTimeout', T :: timeout()} | {'dirtyTimeout', T :: timeout()}) -> Reply :: term().
+-spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout() |{'clean_timeout', T :: timeout()} | {'dirty_timeout', T :: timeout()}) -> Reply :: term().
 call(ServerRef, Request, infinity) ->
    try gen:call(ServerRef, '$gen_call', Request, infinity) of
       {ok, Reply} ->
@@ -532,7 +528,7 @@ call(ServerRef, Request, infinity) ->
       Class:Reason:Stacktrace ->
          erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, Stacktrace)
    end;
-call(ServerRef, Request, {dirtyTimeout, T} = Timeout) ->
+call(ServerRef, Request, {dirty_timeout, T} = Timeout) ->
    try gen:call(ServerRef, '$gen_call', Request, T) of
       {ok, Reply} ->
          Reply
@@ -540,7 +536,7 @@ call(ServerRef, Request, {dirtyTimeout, T} = Timeout) ->
       Class:Reason:Stacktrace ->
          erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace)
    end;
-call(ServerRef, Request, {cleanTimeout, T} = Timeout) ->
+call(ServerRef, Request, {clean_timeout, T} = Timeout) ->
    callClean(ServerRef, Request, Timeout, T);
 call(ServerRef, Request, {_, _} = Timeout) ->
    erlang:error(badarg, [ServerRef, Request, Timeout]);
@@ -622,6 +618,11 @@ do_multi_call(Nodes, Name, Request, Timeout) ->
 -spec send_request(ServerRef :: serverRef(), Request :: term()) -> RequestId :: requestId().
 send_request(Name, Request) ->
    gen:send_request(Name, '$gen_call', Request).
+
+%% gen_event send_request/3
+-spec send_request(ServerRef :: serverRef(), epmHandler(), term()) -> requestId().
+send_request(Name, Handler, Query) ->
+   gen:send_request(Name, self(), {call, Handler, Query}).
 
 -spec wait_response(RequestId :: requestId()) -> {reply, Reply :: term()} | {error, {term(), serverRef()}}.
 wait_response(RequestId) ->
@@ -823,12 +824,12 @@ epmRequest(EpmSrv, Cmd) ->
    EpmSrv ! Cmd,
    ok.
 
--spec epmInfo(serverRef(), epmHandler(), term()) -> term().
-epmInfo(EpmSrv, EpmHandler, Msg) ->
+-spec epm_info(serverRef(), epmHandler(), term()) -> term().
+epm_info(EpmSrv, EpmHandler, Msg) ->
    epmRequest(EpmSrv, {'$epm_info', EpmHandler, Msg}).
 
--spec infoNotify(serverRef(), term()) -> 'ok'.
-infoNotify(EpmSrv, Event) ->
+-spec info_notify(serverRef(), term()) -> 'ok'.
+info_notify(EpmSrv, Event) ->
    epmRequest(EpmSrv, {'$epm_info', '$infoNotify', Event}).
 
 epmRpc(EpmSrv, Cmd) ->
@@ -849,177 +850,157 @@ epmRpc(EpmSrv, Cmd, Timeout) ->
          erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, Timeout]}}, Stacktrace)
    end.
 
--spec callNotify(serverRef(), term()) -> 'ok'.
-callNotify(EpmSrv, Event) ->
+-spec call_notify(serverRef(), term()) -> 'ok'.
+call_notify(EpmSrv, Event) ->
    epmRpc(EpmSrv, {'$syncNotify', Event}).
 
--spec epmCall(serverRef(), epmHandler(), term()) -> term().
-epmCall(EpmSrv, EpmHandler, Query) ->
+-spec epm_call(serverRef(), epmHandler(), term()) -> term().
+epm_call(EpmSrv, EpmHandler, Query) ->
    epmRpc(EpmSrv, {'$epmCall', EpmHandler, Query}).
 
--spec epmCall(serverRef(), epmHandler(), term(), timeout()) -> term().
-epmCall(EpmSrv, EpmHandler, Query, Timeout) ->
+-spec epm_call(serverRef(), epmHandler(), term(), timeout()) -> term().
+epm_call(EpmSrv, EpmHandler, Query, Timeout) ->
    epmRpc(EpmSrv, {'$epmCall', EpmHandler, Query}, Timeout).
 
--spec addEpm(serverRef(), epmHandler(), term()) -> term().
-addEpm(EpmSrv, EpmHandler, Args) ->
+-spec add_epm(serverRef(), epmHandler(), term()) -> term().
+add_epm(EpmSrv, EpmHandler, Args) ->
    epmRpc(EpmSrv, {'$addEpm', EpmHandler, Args}).
 
--spec addSupEpm(serverRef(), epmHandler(), term()) -> term().
-addSupEpm(EpmSrv, EpmHandler, Args) ->
+-spec add_sup_epm(serverRef(), epmHandler(), term()) -> term().
+add_sup_epm(EpmSrv, EpmHandler, Args) ->
    epmRpc(EpmSrv, {'$addSupEpm', EpmHandler, Args}).
 
--spec deleteEpm(serverRef(), epmHandler(), term()) -> term().
-deleteEpm(EpmSrv, EpmHandler, Args) ->
+-spec del_epm(serverRef(), epmHandler(), term()) -> term().
+del_epm(EpmSrv, EpmHandler, Args) ->
    epmRpc(EpmSrv, {'$deleteEpm', EpmHandler, Args}).
 
--spec swapEpm(serverRef(), {epmHandler(), term()}, {epmHandler(), term()}) -> 'ok' | {'error', term()}.
-swapEpm(EpmSrv, {H1, A1}, {H2, A2}) ->
+-spec swap_epm(serverRef(), {epmHandler(), term()}, {epmHandler(), term()}) -> 'ok' | {'error', term()}.
+swap_epm(EpmSrv, {H1, A1}, {H2, A2}) ->
    epmRpc(EpmSrv, {'$swapEpm', H1, A1, H2, A2}).
 
--spec swapSupEpm(serverRef(), {epmHandler(), term()}, {epmHandler(), term()}) -> 'ok' | {'error', term()}.
-swapSupEpm(EpmSrv, {H1, A1}, {H2, A2}) ->
+-spec swap_sup_epm(serverRef(), {epmHandler(), term()}, {epmHandler(), term()}) -> 'ok' | {'error', term()}.
+swap_sup_epm(EpmSrv, {H1, A1}, {H2, A2}) ->
    epmRpc(EpmSrv, {'$swapSupEpm', H1, A1, H2, A2, self()}).
 
--spec whichEpm(serverRef()) -> [epmHandler()].
-whichEpm(EpmSrv) ->
+-spec which_epm(serverRef()) -> [epmHandler()].
+which_epm(EpmSrv) ->
    epmRpc(EpmSrv, '$which_handlers').
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% EPM inner fun
-addNewEpm(InitRet, Module, EpmId, EpmSup) ->
+addNewEpm(InitRet, EpmHers, Module, EpmId, EpmSup) ->
    case InitRet of
       {ok, State} ->
-         EpmHer = #epmHer{epmM = Module, epmId = EpmId, epmS = State},
-         OldList = getEpmList(),
-         setEpmHer(EpmHer),
-         setEpmList([{EpmId, Module, EpmSup} | OldList]),
-         {ok, false};
+         EpmHer = #epmHer{epmId = EpmId, epmM = Module, epmS = State, epmSup = EpmSup},
+         {ok, EpmHers#{EpmId => EpmHer}, false};
       {ok, State, hibernate} ->
-         EpmHer = #epmHer{epmM = Module, epmId = EpmId, epmS = State},
-         OldList = getEpmList(),
-         setEpmHer(EpmHer),
-         setEpmList([{EpmId, Module, EpmSup} | OldList]),
-         {ok, true};
+         EpmHer = #epmHer{epmId = EpmId, epmM = Module, epmS = State, epmSup = EpmSup},
+         {ok, EpmHers#{EpmId => EpmHer}, true};
       Other ->
-         {Other, false}
+         {Other, EpmHers, false}
    end.
 
-doAddEpm({Module, EpmId}, Args, EpmSup) ->
-   case getEpmHer(EpmId) of
-      undefined ->
+doAddEpm(EpmHers, {Module, _SubId} = EpmId, Args, EpmSup) ->
+   case EpmHers of
+      #{EpmId := _EpmHer} ->
+         {{error, existed}, EpmHers, false};
+      _ ->
          try Module:init(Args) of
             Result ->
-               addNewEpm(Result, Module, EpmId, EpmSup)
+               addNewEpm(Result, EpmHers, Module, EpmId, EpmSup)
          catch
             throw:Ret ->
-               addNewEpm(Ret, Module, EpmId, EpmSup);
+               addNewEpm(Ret, EpmHers, Module, EpmId, EpmSup);
             C:R:T ->
-               {{C, R, T}, false}
-         end;
-      _ ->
-         {existed, false}
+               {{error, {C, R, T}}, EpmHers, false}
+         end
    end;
-doAddEpm(Module, Args, EpmSup) ->
-   case getEpmHer(Module) of
-      undefined ->
+doAddEpm(EpmHers, Module, Args, EpmSup) ->
+   case EpmHers of
+      #{Module := _EpmHer} ->
+         {{error, existed}, EpmHers, false};
+      _ ->
          try Module:init(Args) of
             Result ->
-               addNewEpm(Result, Module, Module, EpmSup)
+               addNewEpm(Result, EpmHers, Module, Module, EpmSup)
          catch
             throw:Ret ->
-               addNewEpm(Ret, Module, Module, EpmSup);
+               addNewEpm(Ret, EpmHers, Module, Module, EpmSup);
             C:R:T ->
-               {{C, R, T}, false}
-         end;
-      _ ->
-         {existed, false}
+               {{error, {C, R, T}}, EpmHers, false}
+         end
    end.
 
-doAddSupEpm(Module, Args, EpmSup) ->
-   case doAddEpm(Module, Args, EpmSup) of
-      {ok, _} = Result ->
+doAddSupEpm(EpmHers, EpmHandler, Args, EpmSup) ->
+   case doAddEpm(EpmHers, EpmHandler, Args, EpmSup) of
+      {ok, _, _} = Result ->
          link(EpmSup),
          Result;
       Ret ->
          Ret
    end.
 
-doSwapEpm(EpmId1, Args1, EpmMId, Args2) ->
-   case getEpmHer(EpmId1) of
-      undefined ->
-         doAddEpm(EpmMId, {Args2, undefined}, false);
-      #epmHer{epmSup = EpmSup} = EpmHer ->
+doSwapEpm(EpmHers, EpmId1, Args1, EpmMId, Args2) ->
+   case EpmHers of
+      #{EpmId1 := #epmHer{epmSup = EpmSup} = EpmHer} ->
          State2 = epmTerminate(EpmHer, Args1, swapped, {swapped, EpmMId, EpmSup}),
+         NewEpmHers = maps:remove(EpmId1, EpmHers),
          case EpmSup of
             false ->
-               doAddEpm(EpmMId, {Args2, State2}, false);
+               doAddEpm(NewEpmHers, EpmMId, {Args2, State2}, undefined);
             _ ->
-               doAddSupEpm(EpmMId, {Args2, State2}, EpmSup)
-         end
+               doAddSupEpm(NewEpmHers, EpmMId, {Args2, State2}, EpmSup)
+         end;
+      undefined ->
+         doAddEpm(EpmHers, EpmMId, {Args2, undefined}, undefined)
    end.
 
-doSwapSupEpm(EpmId1, Args1, EpmMId, Args2, EpmSup) ->
-   case getEpmHer(EpmId1) of
-      undefined ->
-         doAddSupEpm(EpmMId, {Args2, undefined}, EpmSup);
-      EpmHer ->
+doSwapSupEpm(EpmHers, EpmId1, Args1, EpmMId, Args2, EpmSup) ->
+   case EpmHers(EpmId1) of
+      #{EpmId1 := EpmHer} ->
          State2 = epmTerminate(EpmHer, Args1, swapped, {swapped, EpmMId, EpmSup}),
-         doAddSupEpm(EpmMId, {Args2, State2}, EpmSup)
-   end.
-
-doNotify([{EpmId, _EmpM} | T], Event, Func, IsHib) ->
-   case doEpmHandle(getEpmHer(EpmId), Func, Event, false) of
-      ok ->
-         doNotify(T, Event, Func, IsHib);
-      hibernate ->
-         doNotify(T, Event, Func, true);
-      _Other ->
-         doNotify(T, Event, Func, IsHib)
-   end;
-doNotify([], _Event, _Func, IsHib) ->
-   IsHib.
-
-doEpmHandle(#epmHer{epmM = EpmM, epmS = EpmS} = EpmHer, Func, Event, From) ->
-   try EpmM:Func(Event, EpmS) of
-      Result ->
-         handleEpmCR(Result, EpmHer, Event, From)
-   catch
-      throw:Ret ->
-         handleEpmCR(Ret, EpmHer, Event, From);
-      C:R:S ->
-         epmTerminate(EpmHer, {error, {C, R, S}}, Event, crash)
-   end;
-doEpmHandle(undefined, _Func, _Event, _From) ->
-   no_epm.
-
-doDeleteEpm(EpmId, Args) ->
-   case getEpmHer(EpmId) of
+         NewEpmHers = maps:remove(EpmId1, EpmHers),
+         doAddSupEpm(NewEpmHers, EpmMId, {Args2, State2}, EpmSup);
       undefined ->
-         {error, module_not_found};
-      EpmHer ->
-         epmTerminate(EpmHer, Args, delete, normal)
+         doAddSupEpm(EpmHers, EpmMId, {Args2, undefined}, EpmSup)
    end.
 
-proTerminate(#epmHer{epmM = EpmM, epmS = State} = EpmHer, Args, LastIn, Reason) ->
-   case erlang:function_exported(EpmM, terminate, 2) of
-      true ->
-         Res = (catch EpmM:terminate(Args, State)),
-         reportTerminate(EpmHer, Reason, Args, LastIn, Res),
-         Res;
-      false ->
-         reportTerminate(EpmHer, Reason, Args, LastIn, ok),
-         ok
+doNotify(EpmHers, Event, Func, _Form) ->
+   FunFor =
+      fun(K, _V, {TemEpmHers, IsHib}) ->
+         {NewEpmHers, NewIsHib} = doEpmHandle(TemEpmHers, K, Func, Event, false),
+         {NewEpmHers, NewIsHib orelse IsHib}
+      end,
+   maps:fold(FunFor, {EpmHers, false}, EpmHers).
+
+doEpmHandle(EpmHers, EpmHandler, Func, Event, From) ->
+   case EpmHers of
+      #{EpmHandler := #epmHer{epmM = EpmM, epmS = EpmS} = EpmHer} ->
+         try EpmM:Func(Event, EpmS) of
+            Result ->
+               handleEpmCR(Result, EpmHers, EpmHer, Event, From)
+         catch
+            throw:Ret ->
+               handleEpmCR(Ret, EpmHers, EpmHer, Event, From);
+            C:R:S ->
+               epmTerminate(EpmHer, {error, {C, R, S}}, Event, crash),
+               NewEpmHers = maps:remove(EpmHandler, EpmHer),
+               {NewEpmHers, false}
+         end;
+      _ ->
+         {EpmHers, false}
    end.
 
-epmTerminate(#epmHer{epmM = EpmM, epmId = EpmId, epmS = State} = EpmHer, Args, LastIn, Reason) ->
-   %% 删除列表的数据
-   OldList = getEpmList(),
-   NewList = lists:keydelete(EpmId, 1, OldList),
-   setEpmList(NewList),
-   %% 删除进程字典中的数据
-   delEpmHer(EpmId),
+doDeleteEpm(EpmHers, EpmHandler, Args) ->
+   case EpmHers of
+      #{EpmHandler := EpmHer} ->
+         epmTerminate(EpmHer, Args, delete, normal),
+         {ok, maps:remove(EpmHandler, EpmHers)};
+      undefined ->
+         {{error, module_not_found}, EpmHers}
+   end.
 
+epmTerminate(#epmHer{epmM = EpmM, epmS = State} = EpmHer, Args, LastIn, Reason) ->
    case erlang:function_exported(EpmM, terminate, 2) of
       true ->
          Res = (catch EpmM:terminate(Args, State)),
@@ -1039,7 +1020,7 @@ reportTerminate(EpmHer, How, _, LastIn, _) ->
 reportTerminate2(#epmHer{epmSup = EpmSup, epmId = EpmId, epmS = State} = EpmHer, Reason, LastIn) ->
    report_error(EpmHer, Reason, State, LastIn),
    case EpmSup of
-      false ->
+      undefined ->
          ok;
       _ ->
          EpmSup ! {gen_event_EXIT, EpmId, Reason},
@@ -1049,7 +1030,7 @@ reportTerminate2(#epmHer{epmSup = EpmSup, epmId = EpmId, epmS = State} = EpmHer,
 report_error(_EpmHer, normal, _, _) -> ok;
 report_error(_EpmHer, shutdown, _, _) -> ok;
 report_error(_EpmHer, {swapped, _, _}, _, _) -> ok;
-report_error(#epmHer{epmM = EpmM, epmId = EpmId}, Reason, State, LastIn) ->
+report_error(#epmHer{epmId = EpmId, epmM = EpmM}, Reason, State, LastIn) ->
    ?LOG_ERROR(
       #{
          label=>{gen_ipc, epm_terminate},
@@ -1094,22 +1075,31 @@ epm_log(#{label := {gen_ipc, no_handle_info}, module := Mod, message := Msg}) ->
    {"** Undefined handle_info in ~tp~n"
    "** Unhandled message: ~tp~n", [Mod, Msg]}.
 
-epmStopAll() ->
-   EpmList = getEpmList(),
-   [
-      begin
-         proTerminate(getEpmHer(EpmId), stop, 'receive', shutdown),
-         case EpmSup =/= false of
-            true ->
-               unlink(EpmSup);
-            _ ->
-               ignore
+epmStopAll(EpmHers) ->
+   FunFor =
+      fun(_K, V, _Ok) ->
+         epmTerminate(V, stop, 'receive', shutdown),
+         case element(#epmHer.epmSup, V) of
+            undefined ->
+               ignore;
+            EpmSup ->
+               unlink(EpmSup)
          end
-      end || {EpmId, _EpmM, EpmSup} <- EpmList
-   ].
+      end,
+   maps:fold(FunFor, ok, EpmHers).
 
-epmStopOne(ExitEmpSup, EpmList) ->
-   [epmTerminate(getEpmHer(EpmId), stop, 'receive', shutdown) || {EpmId, _EpmM, EpmSup} <- EpmList, ExitEmpSup =:= EpmSup].
+epmStopOne(ExitEmpSup, EpmHers) ->
+   FunFor =
+      fun(K, V, TemEpmHers) ->
+         case element(#epmHer.epmSup, V) =:= ExitEmpSup of
+            true ->
+               epmTerminate(V, stop, 'receive', shutdown),
+               maps:remove(K, TemEpmHers);
+            _ ->
+               EpmHers
+         end
+      end,
+   maps:fold(FunFor, EpmHers, EpmHers).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen_event  end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% 仅在＃params.parent不同时更新。今天，这应该是不可能的（OTP-22.0），但是，例如，如果有人在新的sys调用中实现了更改服务器父服务器，则可能发生这种情况。
@@ -1122,22 +1112,22 @@ updateParent(Parent, #cycleData{parent = OldParent} = CycleData) ->
    end.
 %%%==========================================================================
 %%% Internal callbacks
-wakeup_from_hibernate(CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
+wakeupFromHib(CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
    %% 这是一条新消息，唤醒了我们，因此我们必须立即收到它
-   receiveMsgWait(CycleData, Module, CurStatus, CurState, Debug, IsHibernate).
+   receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHibernate).
 
 %%%==========================================================================
 %% Entry point for system_continue/3
 reLoopEntry(CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
    if
       IsHibernate ->
-         proc_lib:hibernate(?MODULE, wakeup_from_hibernate, [CycleData, Module, CurStatus, CurState, Debug, IsHibernate]);
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [CycleData, Module, CurStatus, CurState, Debug, IsHibernate]);
       true ->
-         receiveMsgWait(CycleData, Module, CurStatus, CurState, Debug, IsHibernate)
+         receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHibernate)
    end.
 
 %% 接收新的消息
-receiveMsgWait(#cycleData{parent = Parent, hibernateAfter = HibernateAfterTimeout, timers = Timers, epmList = EpmList} = CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
+receiveIng(#cycleData{parent = Parent, hibernateAfter = HibernateAfterTimeout, timers = Timers, epmHers = EpmHers} = CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
    receive
       Msg ->
          case Msg of
@@ -1156,14 +1146,14 @@ receiveMsgWait(#cycleData{parent = Parent, hibernateAfter = HibernateAfterTimeou
                end;
             {system, PidFrom, Request} ->
                %% 不返回但尾递归调用 system_continue/3
-               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {CycleData, Module, CurStatus, CurState, IsHibernate});
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {CycleData, Module, CurStatus, CurState, IsHibernate}, IsHibernate);
             {'EXIT', PidFrom, Reason} ->
                case Parent =:= PidFrom of
                   true ->
                      terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, []);
                   _ ->
-                     epmStopOne(PidFrom, EpmList),
-                     matchInfoMsg(CycleData, Module, CurStatus, CurState, Debug, Msg)
+                     NewEpmHers = epmStopOne(PidFrom, EpmHers),
+                     matchInfoMsg(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, Debug, Msg)
                end;
             {'$epm_call', From, Request} ->
                matchEpmCallMsg(CycleData, Module, CurStatus, CurState, Debug, From, Request);
@@ -1174,7 +1164,7 @@ receiveMsgWait(#cycleData{parent = Parent, hibernateAfter = HibernateAfterTimeou
          end
    after
       HibernateAfterTimeout ->
-         proc_lib:hibernate(?MODULE, wakeup_from_hibernate, [CycleData, Module, CurStatus, CurState, Debug, IsHibernate])
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [CycleData, Module, CurStatus, CurState, Debug, IsHibernate])
    end.
 
 matchCallMsg(CycleData, Module, CurStatus, CurState, Debug, From, Request) ->
@@ -1229,48 +1219,49 @@ matchTimeoutMsg(CycleData, Module, CurStatus, CurState, Debug, TimeoutType, Time
          terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, [CurEvent])
    end.
 
-matchEpmCallMsg(CycleData, Module, CurStatus, CurState, Debug, From, Request) ->
+matchEpmCallMsg(#cycleData{epmHers = EpmHers} = CycleData, Module, CurStatus, CurState, Debug, From, Request) ->
    NewDebug = ?SYS_DEBUG(Debug, CycleData, {in, Request, CurStatus}),
    case Request of
       '$which_handlers' ->
-         reply(From, getEpmList());
+         reply(From, EpmHers);
       {'$addEpm', EpmHandler, Args} ->
-         {Reply, IsHib} = doAddEpm(EpmHandler, Args, false),
+         {Reply, NewEpmHers, IsHib} = doAddEpm(EpmHers, EpmHandler, Args, undefined),
          reply(From, Reply),
-         reLoopEntry(CycleData, Module, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, IsHib);
       {'$addSupEpm', EpmHandler, Args, EpmSup} ->
-         {Reply, IsHib} = doAddSupEpm(EpmHandler, Args, EpmSup),
+         {Reply, NewEpmHers, IsHib} = doAddSupEpm(EpmHers, EpmHandler, Args, EpmSup),
          reply(From, Reply),
-         reLoopEntry(CycleData, Module, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, IsHib);
       {'$deleteEpm', EpmHandler, Args} ->
-         Reply = doDeleteEpm(EpmHandler, Args),
+         {Reply, NewEpmHers} = doDeleteEpm(EpmHers, EpmHandler, Args),
          reply(From, Reply),
-         receiveMsgWait(CycleData, Module, CurStatus, CurState, NewDebug, false);
+         receiveIng(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, false);
       {'$swapEpm', EpmId1, Args1, EpmId2, Args2} ->
-         {Reply, IsHib} = doSwapEpm(EpmId1, Args1, EpmId2, Args2),
+         {Reply, NewEpmHers, IsHib} = doSwapEpm(EpmHers, EpmId1, Args1, EpmId2, Args2),
          reply(From, Reply),
-         reLoopEntry(CycleData, Module, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, IsHib);
       {'$swapSupEpm', EpmId1, Args1, EpmId2, Args2, SupPid} ->
-         {Reply, IsHib} = doSwapSupEpm(EpmId1, Args1, EpmId2, Args2, SupPid),
+         {Reply, NewEpmHers, IsHib} = doSwapSupEpm(EpmHers, EpmId1, Args1, EpmId2, Args2, SupPid),
          reply(From, Reply),
-         reLoopEntry(CycleData, Module, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, IsHib);
       {'$syncNotify', Event} ->
-         IsHib = doNotify(getEpmList(), Event, handleEvent, false),
+         {NewEpmHers, IsHib} = doNotify(EpmHers, Event, handleEvent, false),
          reply(From, ok),
-         startEpmCall(CycleData, Module, CurStatus, CurState, NewDebug, handleEpmEvent, Request, IsHib);
+         startEpmCall(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, handleEpmEvent, Request, IsHib);
       {'$epmCall', EpmHandler, Query} ->
-         IsHib = doEpmHandle(getEpmHer(EpmHandler), handleCall, Query, From),
-         startEpmCall(CycleData, Module, CurStatus, CurState, Debug, handleEpmCall, Request, IsHib)
+         {NewEpmHers, IsHib} = doEpmHandle(EpmHers, EpmHandler, handleCall, Query, From),
+         startEpmCall(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, handleEpmCall, Request, IsHib)
    end.
 
-matchEpmInfoMsg(CycleData, Module, CurStatus, CurState, Debug, CmdOrEmpHandler, Event) ->
+matchEpmInfoMsg(#cycleData{epmHers = EpmHers} = CycleData, Module, CurStatus, CurState, Debug, CmdOrEmpHandler, Event) ->
+   NewDebug = ?SYS_DEBUG(Debug, CycleData, {in, {CmdOrEmpHandler, Event}, CurStatus}),
    case CmdOrEmpHandler of
       '$infoNotify' ->
-         IsHib = doNotify(getEpmList(), Event, handleEvent, false),
-         startEpmCall(CycleData, Module, CurStatus, CurState, Debug, handleEpmEvent, Event, IsHib);
+         {NewEpmHers, IsHib} = doNotify(EpmHers, Event, handleEvent, false),
+         startEpmCall(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, handleEpmEvent, Event, IsHib);
       EpmHandler ->
-         IsHib = doEpmHandle(getEpmHer(EpmHandler), Event, handleInfo, false),
-         startEpmCall(CycleData, Module, CurStatus, CurState, Debug, handleEpmInfo, Event, IsHib)
+         {NewEpmHers, IsHib} = doEpmHandle(EpmHers, EpmHandler, Event, handleInfo, false),
+         startEpmCall(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, handleEpmInfo, Event, IsHib)
    end.
 
 startEpmCall(CycleData, Module, CurStatus, CurState, Debug, CallbackFun, Event, IsHib) ->
@@ -1287,7 +1278,7 @@ startEpmCall(CycleData, Module, CurStatus, CurState, Debug, CallbackFun, Event, 
                terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, [Event])
          end;
       _ ->
-         receiveMsgWait(CycleData, Module, CurStatus, CurState, Debug, IsHib)
+         receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHib)
    end.
 
 startEnterCall(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter) ->
@@ -1357,63 +1348,64 @@ startEventCall(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, {Type,
    end.
 
 %% handleEpmCallbackRet
-handleEpmCR(Result, EpmHer, Event, From) ->
+handleEpmCR(Result, EpmHers, #epmHer{epmId = EpmId} = EpmHer, Event, From) ->
    case Result of
       ok ->
-         ok;
+         {EpmHers, false};
       {ok, NewEpmS} ->
          MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
-         setEpmHer(MewEpmHer),
-         ok;
+         {EpmHers#{EpmId := MewEpmHer}, false};
       {ok, NewEpmS, hibernate} ->
          MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
-         setEpmHer(MewEpmHer),
-         hibernate;
+         {EpmHers#{EpmId := MewEpmHer}, true};
       {swapEpm, NewEpmS, Args1, EpmMId, Args2} ->
          #epmHer{epmId = OldEpmMId, epmSup = EpmSup} = MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
          State = epmTerminate(MewEpmHer, Args1, swapped, {swapped, OldEpmMId, EpmSup}),
-         case EpmSup of
-            false ->
-               doAddEpm(EpmMId, {Args2, State}, false);
-            _ ->
-               doAddSupEpm(EpmMId, {Args2, State}, EpmSup)
-         end,
-         ok;
+         TemEpmHers = maps:remove(EpmId, EpmHers),
+         {_, NewEpmHers, IsHib} =
+            case EpmSup of
+               undefined ->
+                  doAddEpm(TemEpmHers, EpmMId, {Args2, State}, undefined);
+               _ ->
+                  doAddSupEpm(TemEpmHers, EpmMId, {Args2, State}, EpmSup)
+            end,
+         {NewEpmHers, IsHib};
       {swapEpm, Reply, NewEpmS, Args1, EpmMId, Args2} ->
          reply(From, Reply),
          #epmHer{epmId = OldEpmMId, epmSup = EpmSup} = MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
          State = epmTerminate(MewEpmHer, Args1, swapped, {swapped, OldEpmMId, EpmSup}),
-         case EpmSup of
-            false ->
-               doAddEpm(EpmMId, {Args2, State}, false);
-            _ ->
-               doAddSupEpm(EpmMId, {Args2, State}, EpmSup)
-         end,
-         ok;
+         TemEpmHers = maps:remove(EpmId, EpmHers),
+         {_, NewEpmHers, IsHib} =
+            case EpmSup of
+               undefined ->
+                  doAddEpm(TemEpmHers, EpmMId, {Args2, State}, undefined);
+               _ ->
+                  doAddSupEpm(TemEpmHers, EpmMId, {Args2, State}, EpmSup)
+            end,
+         {NewEpmHers, IsHib};
       removeEpm ->
          epmTerminate(EpmHer, removeEpm, remove, normal),
-         ok;
+         {maps:remove(EpmId, EpmHers), false};
       {removeEpm, Reply} ->
          reply(From, Reply),
          epmTerminate(EpmHer, removeEpm, remove, normal),
-         ok;
+         {maps:remove(EpmId, EpmHers), false};
       {reply, Reply} ->
          reply(From, Reply),
-         ok;
+         {EpmHers, false};
       {reply, Reply, NewEpmS} ->
          reply(From, Reply),
          MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
-         setEpmHer(MewEpmHer),
-         ok;
+         {EpmHers#{EpmId := MewEpmHer}, false};
       {reply, Reply, NewEpmS, hibernate} ->
          reply(From, Reply),
          MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
-         setEpmHer(MewEpmHer),
-         hibernate;
+         {EpmHers#{EpmId := MewEpmHer}, true};
       Other ->
          epmTerminate(EpmHer, {error, Other}, Event, crash),
-         ok
+         {maps:remove(EpmId, EpmHers), false}
    end.
+
 %% handleEnterCallbackRet
 handleEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter, Result) ->
    case Result of
@@ -1450,7 +1442,7 @@ handleEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEve
 handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, CallbackForm, From) ->
    case Result of
       {noreply, NewState} ->
-         receiveMsgWait(CycleData, Module, CurStatus, NewState, Debug, false);
+         receiveIng(CycleData, Module, CurStatus, NewState, Debug, false);
       {noreply, NewState, Option} ->
          case Option of
             hibernate ->
@@ -1463,7 +1455,7 @@ handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result,
       {reply, Reply, NewState} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
-         receiveMsgWait(CycleData, Module, CurStatus, NewState, NewDebug, false);
+         receiveIng(CycleData, Module, CurStatus, NewState, NewDebug, false);
       {reply, Reply, NewState, Option} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
@@ -1880,12 +1872,14 @@ mergeTimeoutEvents([TimeoutEvent | TimeoutEvents], Status, CycleData, Debug, Eve
    mergeTimeoutEvents(TimeoutEvents, Status, CycleData, NewDebug, [TimeoutEvent | Events]).
 
 %% Return a list of all pending timeouts
-list_timeouts(Timers) ->
-   {maps:size(Timers),
+listTimeouts(Timers) ->
+   {
+      maps:size(Timers),
       maps:fold(
          fun(TimeoutType, {_TimerRef, TimeoutMsg}, Acc) ->
             [{TimeoutType, TimeoutMsg} | Acc]
-         end, [], Timers)}.
+         end, [], Timers)
+   }.
 %%---------------------------------------------------------------------------
 
 %% 状态转换已完成，如果有排队事件，则继续循环，否则获取新事件
@@ -1926,7 +1920,8 @@ replyThenTerminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurS
    end.
 
 terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents) ->
-   epmStopAll(),
+   epmStopAll(element(#cycleData.epmHers, CycleData)),
+   %% 这里停止所有的epm 但是并没有更新 epmHers为#{} 目前感觉没必要清理掉
    case erlang:function_exported(Module, terminate, 3) of
       true ->
          try Module:terminate(Reason, CurStatus, CurState) of
@@ -1957,30 +1952,31 @@ terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Deb
          erlang:raise(Class, Reason, Stacktrace)
    end.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% debug 日志 Start%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 error_info(Class, Reason, Stacktrace, #cycleData{name = Name, isEnter = IsEnter, postponed = Postponed, timers = Timers} = CycleData, Module, CurStatus, CurState, Debug, LeftEvents) ->
    Log = sys:get_log(Debug),
    ?LOG_ERROR(
       #{
          label => {gen_ipc, terminate},
          name => Name,
+         module => Module,
          queue => LeftEvents,
          postponed => Postponed,
          isEnter => IsEnter,
          status => format_status(terminate, get(), CycleData, Module, CurStatus, CurState),
-         timeouts => list_timeouts(Timers),
+         timeouts => listTimeouts(Timers),
          log => Log,
          reason => {Class, Reason, Stacktrace},
-         client_info => clientStacktrace(LeftEvents)
+         client_info => cliStacktrace(LeftEvents)
       },
       #{
          domain => [otp],
-         report_cb => fun gen_ipc:format_log/1,
-         error_logger => #{tag => error}}
-   ).
+         report_cb => fun gen_ipc:format_log/2,
+         error_logger => #{tag => error, report_cb => fun gen_ipc:format_log/1}}).
 
-clientStacktrace([]) ->
+cliStacktrace([]) ->
    undefined;
-clientStacktrace([{{call, {Pid, _Tag}}, _Req} | _]) when is_pid(Pid) ->
+cliStacktrace([{{call, {Pid, _Tag}}, _Req} | _]) when is_pid(Pid) ->
    if
       node(Pid) =:= node() ->
          case process_info(Pid, [current_stacktrace, registered_name]) of
@@ -1994,175 +1990,398 @@ clientStacktrace([{{call, {Pid, _Tag}}, _Req} | _]) when is_pid(Pid) ->
       true ->
          {Pid, remote}
    end;
-clientStacktrace([_ | _]) ->
+cliStacktrace([_ | _]) ->
+   undefined;
+cliStacktrace(_) ->
    undefined.
 
-format_log(#{label:={gen_statusm, terminate},
-   name:=Name,
-   queue:=LeftEvents,
-   postponed:=Postponed,
-   callback_mode:=CallbackMode,
-   status_enter:=StatusEnter,
-   status:=FmtData,
-   timeouts:=Timeouts,
-   log:=Log,
-   reason:={Class, Reason, Stacktrace},
-   client_info:=ClientInfo}) ->
-   {FixedReason, FixedStacktrace} =
-      case Stacktrace of
-         [{M, F, Args, _} | ST]
-            when Class =:= error, Reason =:= undef ->
-            case code:is_loaded(M) of
-               false ->
-                  {{'module could not be loaded', M}, ST};
-               _ ->
-                  Arity =
-                     if
-                        is_list(Args) ->
-                           length(Args);
-                        is_integer(Args) ->
-                           Args
-                     end,
-                  case erlang:function_exported(M, F, Arity) of
-                     true ->
-                        {Reason, Stacktrace};
-                     false ->
-                        {{'function not exported', {M, F, Arity}}, ST}
-                  end
-            end;
-         _ -> {Reason, Stacktrace}
+%% format_log/1 is the report callback used by Logger handler
+%% error_logger only. It is kept for backwards compatibility with
+%% legacy error_logger event handlers. This function must always
+%% return {Format,Args} compatible with the arguments in this module's
+%% calls to error_logger prior to OTP-21.0.
+format_log(Report) ->
+   Depth = error_logger:get_format_depth(),
+   FormatOpts = #{
+      chars_limit => unlimited,
+      depth => Depth,
+      single_line => false,
+      encoding => utf8
+   },
+   format_log_multi(limit_report(Report, Depth), FormatOpts).
+
+limit_report(Report, unlimited) ->
+   Report;
+limit_report(
+   #{label:={gen_ipc, terminate},
+      queue:=Q,
+      postponed:=Postponed,
+      module:=Module,
+      status:=FmtData,
+      timeouts:=Timeouts,
+      log:=Log,
+      reason:={Class, Reason, Stacktrace},
+      client_info:=ClientInfo} = Report,
+   Depth) ->
+   Report#{
+      queue =>
+      case Q of
+         [Event | Events] ->
+            [io_lib:limit_term(Event, Depth) | io_lib:limit_term(Events, Depth)];
+         _ ->
+            []
       end,
-   {ClientFmt, ClientArgs} = format_client_log(ClientInfo),
-   CBMode =
-      case StatusEnter of
-         true ->
-            [CallbackMode, status_enter];
-         false ->
-            CallbackMode
+      postponed =>
+      case Postponed of
+         [] -> [];
+         _ -> io_lib:limit_term(Postponed, Depth)
       end,
-   {"** Status machine ~tp terminating~n" ++
-      case LeftEvents of
-         [] -> "";
-         _ -> "** Last event = ~tp~n"
+      modules => io_lib:limit_term(Module, Depth),
+      status => io_lib:limit_term(FmtData, Depth),
+      timeouts =>
+      case Timeouts of
+         {0, _} -> Timeouts;
+         _ -> io_lib:limit_term(Timeouts, Depth)
+      end,
+      log =>
+      case Log of
+         [] -> [];
+         _ -> [io_lib:limit_term(T, Depth) || T <- Log]
+      end,
+      reason =>
+      {Class, io_lib:limit_term(Reason, Depth), io_lib:limit_term(Stacktrace, Depth)},
+      client_info => limit_client_info(ClientInfo, Depth)
+   }.
+
+limit_client_info({Pid, {Name, Stacktrace}}, Depth) ->
+   {Pid, {Name, io_lib:limit_term(Stacktrace, Depth)}};
+limit_client_info(Client, _Depth) ->
+   Client.
+
+%% format_log/2 is the report callback for any Logger handler, except
+%% error_logger.
+format_log(Report, FormatOpts0) ->
+   Default = #{
+      chars_limit => unlimited,
+      depth => unlimited,
+      single_line => false,
+      encoding => utf8
+   },
+   FormatOpts = maps:merge(Default, FormatOpts0),
+   IoOpts =
+      case FormatOpts of
+         #{chars_limit:=unlimited} -> [];
+         #{chars_limit:=Limit} -> [{chars_limit, Limit}]
+      end,
+   {Format, Args} = format_log_single(Report, FormatOpts),
+   io_lib:format(Format, Args, IoOpts).
+
+format_log_single(
+   #{
+      label:={gen_ipc, terminate},
+      name:=Name,
+      queue:=Q,
+      %% postponed
+      %% isEnter
+      status:=FmtData,
+      %% timeouts
+      log:=Log,
+      reason:={Class, Reason, Stacktrace},
+      client_info:=ClientInfo},
+   #{single_line:=true, depth:=Depth} = FormatOpts) ->
+   P = p(FormatOpts),
+   {FixedReason, FixedStacktrace} = fix_reason(Class, Reason, Stacktrace),
+   {ClientFmt, ClientArgs} = format_client_log_single(ClientInfo, P, Depth),
+   Format =
+      lists:append(
+         ["State machine ", P, " terminating. Reason: ", P,
+            case FixedStacktrace of
+               [] -> "";
+               _ -> ". Stack: " ++ P
+            end,
+            case Q of
+               [] -> "";
+               _ -> ". Last event: " ++ P
+            end,
+            ". State: ", P,
+            case Log of
+               [] -> "";
+               _ -> ". Log: " ++ P
+            end,
+            "."]
+      ),
+   Args0 =
+      [Name, FixedReason] ++
+      case FixedStacktrace of
+         [] -> [];
+         _ -> [FixedStacktrace]
       end ++
-      "** When server status  = ~tp~n" ++
-      "** Reason for termination = ~w:~tp~n" ++
-      "** Callback mode = ~p~n" ++
-      case LeftEvents of
-         [_, _ | _] -> "** Queued = ~tp~n";
-         _ -> ""
+      case Q of
+         [] -> [];
+         [Event | _] -> [Event]
+      end ++
+      [FmtData] ++
+      case Log of
+         [] -> [];
+         _ -> [Log]
+      end,
+   Args =
+      case Depth of
+         unlimited ->
+            Args0;
+         _ ->
+            lists:flatmap(fun(A) -> [A, Depth] end, Args0)
+      end,
+   {Format ++ ClientFmt, Args ++ ClientArgs};
+format_log_single(Report, FormatOpts) ->
+   format_log_multi(Report, FormatOpts).
+
+format_log_multi(
+   #{
+      label:={gen_ipc, terminate},
+      name:=Name,
+      queue:=Q,
+      postponed:=Postponed,
+      module:=Module,
+      isEnter:=StateEnter,
+      status:=FmtData,
+      timeouts:=Timeouts,
+      log:=Log,
+      reason:={Class, Reason, Stacktrace},
+      client_info:=ClientInfo},
+   #{depth:=Depth} = FormatOpts) ->
+   P = p(FormatOpts),
+   {FixedReason, FixedStacktrace} = fix_reason(Class, Reason, Stacktrace),
+   {ClientFmt, ClientArgs} = format_client_log(ClientInfo, P, Depth),
+   CBMode =
+      case StateEnter of
+         true ->
+            [Module, 'isEnter=true'];
+         false ->
+            Module
+      end,
+   Format =
+      lists:append(
+         ["** gen_ipc State machine ", P, " terminating~n",
+            case Q of
+               [] -> "";
+               _ -> "** Last event = " ++ P ++ "~n"
+            end,
+            "** When server status  = ", P, "~n",
+            "** Reason for termination = ", P, ":", P, "~n",
+            "** Callback modules = ", P, "~n",
+            "** Callback mode = ", P, "~n",
+            case Q of
+               [_, _ | _] -> "** Queued = " ++ P ++ "~n";
+               _ -> ""
+            end,
+            case Postponed of
+               [] -> "";
+               _ -> "** Postponed = " ++ P ++ "~n"
+            end,
+            case FixedStacktrace of
+               [] -> "";
+               _ -> "** Stacktrace =~n**  " ++ P ++ "~n"
+            end,
+            case Timeouts of
+               {0, _} -> "";
+               _ -> "** Time-outs: " ++ P ++ "~n"
+            end,
+            case Log of
+               [] -> "";
+               _ -> "** Log =~n**  " ++ P ++ "~n"
+            end]),
+   Args0 =
+      [Name |
+         case Q of
+            [] -> [];
+            [Event | _] -> [Event]
+         end] ++
+      [FmtData,
+         Class, FixedReason,
+         Module,
+         CBMode] ++
+      case Q of
+         [_ | [_ | _] = Events] -> [Events];
+         _ -> []
       end ++
       case Postponed of
-         [] -> "";
-         _ -> "** Postponed = ~tp~n"
+         [] -> [];
+         _ -> [Postponed]
       end ++
       case FixedStacktrace of
-         [] -> "";
-         _ -> "** Stacktrace =~n**  ~tp~n"
+         [] -> [];
+         _ -> [FixedStacktrace]
       end ++
       case Timeouts of
-         {0, _} -> "";
-         _ -> "** Time-outs: ~p~n"
+         {0, _} -> [];
+         _ -> [Timeouts]
       end ++
       case Log of
-         [] -> "";
-         _ -> "** Log =~n**  ~tp~n"
-      end ++ ClientFmt,
-         [Name |
-            case LeftEvents of
-               [] -> [];
-               [Event | _] -> [error_logger:limit_term(Event)]
-            end] ++
-         [error_logger:limit_term(FmtData),
-            Class, error_logger:limit_term(FixedReason),
-            CBMode] ++
-         case LeftEvents of
-            [_ | [_ | _] = Events] -> [error_logger:limit_term(Events)];
-            _ -> []
-         end ++
-         case Postponed of
-            [] -> [];
-            _ -> [error_logger:limit_term(Postponed)]
-         end ++
-         case FixedStacktrace of
-            [] -> [];
-            _ -> [error_logger:limit_term(FixedStacktrace)]
-         end ++
-         case Timeouts of
-            {0, _} -> [];
-            _ -> [error_logger:limit_term(Timeouts)]
-         end ++
-         case Log of
-            [] -> [];
-            _ -> [[error_logger:limit_term(T) || T <- Log]]
-         end ++ ClientArgs}.
+         [] -> [];
+         _ -> [Log]
+      end,
+   Args =
+      case Depth of
+         unlimited ->
+            Args0;
+         _ ->
+            lists:flatmap(fun(A) -> [A, Depth] end, Args0)
+      end,
+   {Format ++ ClientFmt, Args ++ ClientArgs}.
 
-format_client_log(undefined) ->
+fix_reason(Class, Reason, Stacktrace) ->
+   case Stacktrace of
+      [{M, F, Args, _} | ST]
+         when Class =:= error, Reason =:= undef ->
+         case code:is_loaded(M) of
+            false ->
+               {{'module could not be loaded', M}, ST};
+            _ ->
+               Arity =
+                  if
+                     is_list(Args) ->
+                        length(Args);
+                     is_integer(Args) ->
+                        Args
+                  end,
+               case erlang:function_exported(M, F, Arity) of
+                  true ->
+                     {Reason, Stacktrace};
+                  false ->
+                     {{'function not exported', {M, F, Arity}}, ST}
+               end
+         end;
+      _ -> {Reason, Stacktrace}
+   end.
+
+format_client_log_single(undefined, _, _) ->
    {"", []};
-format_client_log({Pid, dead}) ->
+format_client_log_single({Pid, dead}, _, _) ->
+   {" Client ~0p is dead.", [Pid]};
+format_client_log_single({Pid, remote}, _, _) ->
+   {" Client ~0p is remote on node ~0p.", [Pid, node(Pid)]};
+format_client_log_single({_Pid, {Name, Stacktrace0}}, P, Depth) ->
+   %% Minimize the stacktrace a bit for single line reports. This is
+   %% hopefully enough to point out the position.
+   Stacktrace = lists:sublist(Stacktrace0, 4),
+   Format = lists:append([" Client ", P, " stacktrace: ", P, "."]),
+   Args =
+      case Depth of
+         unlimited ->
+            [Name, Stacktrace];
+         _ ->
+            [Name, Depth, Stacktrace, Depth]
+      end,
+   {Format, Args}.
+
+format_client_log(undefined, _, _) ->
+   {"", []};
+format_client_log({Pid, dead}, _, _) ->
    {"** Client ~p is dead~n", [Pid]};
-format_client_log({Pid, remote}) ->
+format_client_log({Pid, remote}, _, _) ->
    {"** Client ~p is remote on node ~p~n", [Pid, node(Pid)]};
-format_client_log({_Pid, {Name, Stacktrace}}) ->
-   {"** Client ~tp stacktrace~n"
-   "** ~tp~n", [Name, error_logger:limit_term(Stacktrace)]}.
+format_client_log({_Pid, {Name, Stacktrace}}, P, Depth) ->
+   Format = lists:append(["** Client ", P, " stacktrace~n** ", P, "~n"]),
+   Args =
+      case Depth of
+         unlimited ->
+            [Name, Stacktrace];
+         _ ->
+            [Name, Depth, Stacktrace, Depth]
+      end,
+   {Format, Args}.
+
+p(#{single_line:=Single, depth:=Depth, encoding:=Enc}) ->
+   "~" ++ single(Single) ++ mod(Enc) ++ p(Depth);
+p(unlimited) ->
+   "p";
+p(_Depth) ->
+   "P".
+
+single(true) -> "0";
+single(false) -> "".
+
+mod(latin1) -> "";
+mod(_) -> "t".
 
 %% Call Module:format_status/2 or return a default value
 format_status(Opt, PDict, _CycleData, Module, CurStatus, CurState) ->
-   case erlang:function_exported(Module, format_status, 2) of
+   case erlang:function_exported(Module, formatStatus, 2) of
       true ->
-         try Module:formatStatus(Opt, [PDict, CurStatus, CurState])
+         try Module:format_status(Opt, [PDict, CurStatus, CurState])
          catch
-            throw:Result ->
-               Result;
+            Result -> Result;
             _:_ ->
-               format_status_default(Opt, {CurStatus, atom_to_list(Module) ++ ":format_status/2 crashed"})
+               format_status_default(Opt, {{CurStatus, CurState}, atom_to_list(Module) ++ ":formatStatus/2 crashed"})
          end;
       false ->
          format_status_default(Opt, {CurStatus, CurState})
    end.
 
 %% The default Module:format_status/3
-format_status_default(Opt, Status_State) ->
+format_status_default(Opt, State_Data) ->
    case Opt of
       terminate ->
-         Status_State;
+         State_Data;
       _ ->
-         [{data, [{"Status", Status_State}]}]
+         [{data, [{"State", State_Data}]}]
    end.
 
-%%---------------------------------------------------------------------------
-%% Format debug messages.  Print them as the call-back module sees
-%% them, not as the real erlang messages.  Use trace for that.
-%%--------------------------------------------------------------------------
 print_event(Dev, SystemEvent, Name) ->
    case SystemEvent of
       {in, Event, Status} ->
-         io:format(Dev, "*DBG* ~tp receive ~ts in status ~tp~n", [Name, event_string(Event), Status]);
+         io:format(
+            Dev, "*DBG* ~tp receive ~ts in Status ~tp~n",
+            [Name, event_string(Event), Status]);
       {code_change, Event, Status} ->
-         io:format(Dev, "*DBG* ~tp receive ~ts after code change in status ~tp~n", [Name, event_string(Event), Status]);
+         io:format(
+            Dev, "*DBG* ~tp receive ~ts after code change in Status ~tp~n",
+            [Name, event_string(Event), Status]);
       {out, Reply, {To, _Tag}} ->
-         io:format(Dev, "*DBG* ~tp send ~tp to ~tw~n", [Name, Reply, To]);
-      {out, Replies} ->
-         io:format(Dev, "*DBG* ~tp sendto list ~tw~n", [Name, Replies]);
+         io:format(
+            Dev, "*DBG* ~tp send ~tp to ~tw~n",
+            [Name, Reply, To]);
+      {out, Replys} ->
+         io:format(
+            Dev, "*DBG* ~tp sends to: ~tp~n",
+            [Name, Replys]);
       {enter, Status} ->
-         io:format(Dev, "*DBG* ~tp enter in status ~tp~n", [Name, Status]);
-      {start_timer, Action, Status} ->
-         io:format(Dev, "*DBG* ~tp start_timer ~tp in status ~tp~n", [Name, Action, Status]);
+         io:format(
+            Dev, "*DBG* ~tp enter in Status ~tp~n",
+            [Name, Status]);
+      {start_timer, Action} ->
+         io:format(
+            Dev, "*DBG* ~tp start_timer ~tp ~n",
+            [Name, Action]);
       {insert_timeout, Event, Status} ->
-         io:format(Dev, "*DBG* ~tp insert_timeout ~tp in status ~tp~n", [Name, Event, Status]);
+         io:format(
+            Dev, "*DBG* ~tp insert_timeout ~tp in Status ~tp~n",
+            [Name, Event, Status]);
       {terminate, Reason, Status} ->
-         io:format(Dev, "*DBG* ~tp terminate ~tp in status ~tp~n", [Name, Reason, Status]);
+         io:format(
+            Dev, "*DBG* ~tp terminate ~tp in Status ~tp~n",
+            [Name, Reason, Status]);
+      {change_isEnter, IsEnter} ->
+         io:format(
+            Dev, "*DBG* ~tp change_isEnter to ~tp ~n",
+            [Name, IsEnter]);
       {Tag, Event, Status, NextStatus}
          when Tag =:= postpone; Tag =:= consume ->
-         StatusString =
+         StateString =
             case NextStatus of
                Status ->
                   io_lib:format("~tp", [Status]);
                _ ->
                   io_lib:format("~tp => ~tp", [Status, NextStatus])
             end,
-         io:format(Dev, "*DBG* ~tp ~tw ~ts in status ~ts~n", [Name, Tag, event_string(Event), StatusString])
+         io:format(
+            Dev, "*DBG* ~tp ~tw ~ts in state ~ts~n",
+            [Name, Tag, event_string(Event), StateString]);
+      _NotMatch ->
+         io:format(
+            Dev, "*DBG* ~tp NotMatch ~tp ~n",
+            [Name, _NotMatch])
    end.
 
 event_string(Event) ->
@@ -2172,24 +2391,4 @@ event_string(Event) ->
       {EventType, EventContent} ->
          io_lib:format("~tw ~tp", [EventType, EventContent])
    end.
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% 进程字典操作函数 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-setEpmList(EpmList) ->
-   erlang:put(?PD_EPM_LIST, EpmList).
-
-getEpmList() ->
-   case erlang:get(?PD_EPM_LIST) of
-      undefined ->
-         [];
-      RetList ->
-         RetList
-   end.
-
-delEpmHer(#epmHer{epmId = EpmId}) ->
-   erlang:erase({?PD_EPM_FLAG, EpmId}).
-
-setEpmHer(#epmHer{epmId = EpmId} = EpmHer) ->
-   erlang:put({?PD_EPM_FLAG, EpmId}, EpmHer).
-getEpmHer(EpmId) ->
-   erlang:get({?PD_EPM_FLAG, EpmId}).
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% debug 日志 End %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
