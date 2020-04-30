@@ -45,6 +45,8 @@
    , epm_log/1
 ]).
 
+-export([receiveIng/6]).
+
 % %% timeout相关宏定义
 % -define(REL_TIMEOUT(T), ((is_integer(T) andalso (T) >= 0) orelse (T) =:= infinity)).
 % -define(ABS_TIMEOUT(T), (is_integer(T) orelse (T) =:= infinity)).
@@ -460,7 +462,7 @@ system_continue(Parent, Debug, {CycleData, Module, CurStatus, CurState, IsHibern
       IsHibernate ->
          proc_lib:hibernate(?MODULE, wakeupFromHib, [NewCycleData, Module, CurStatus, CurState, Debug, IsHibernate]);
       true ->
-         receiveIng(NewCycleData, Module, CurStatus, CurState, Debug, IsHibernate)
+         ?MODULE:receiveIng(NewCycleData, Module, CurStatus, CurState, Debug, IsHibernate)
    end.
 
 system_terminate(Reason, Parent, Debug, {CycleData, Module, CurStatus, CurState, _IsHibernate}) ->
@@ -1114,7 +1116,7 @@ updateParent(Parent, #cycleData{parent = OldParent} = CycleData) ->
 %%% Internal callbacks
 wakeupFromHib(CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
    %% 这是一条新消息，唤醒了我们，因此我们必须立即收到它
-   receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHibernate).
+   ?MODULE:receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHibernate).
 
 %%%==========================================================================
 %% Entry point for system_continue/3
@@ -1123,7 +1125,7 @@ reLoopEntry(CycleData, Module, CurStatus, CurState, Debug, IsHibernate) ->
       IsHibernate ->
          proc_lib:hibernate(?MODULE, wakeupFromHib, [CycleData, Module, CurStatus, CurState, Debug, IsHibernate]);
       true ->
-         receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHibernate)
+         ?MODULE:receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHibernate)
    end.
 
 %% 接收新的消息
@@ -1235,7 +1237,7 @@ matchEpmCallMsg(#cycleData{epmHers = EpmHers} = CycleData, Module, CurStatus, Cu
       {'$deleteEpm', EpmHandler, Args} ->
          {Reply, NewEpmHers} = doDeleteEpm(EpmHers, EpmHandler, Args),
          reply(From, Reply),
-         receiveIng(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, false);
+         ?MODULE:receiveIng(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, false);
       {'$swapEpm', EpmId1, Args1, EpmId2, Args2} ->
          {Reply, NewEpmHers, IsHib} = doSwapEpm(EpmHers, EpmId1, Args1, EpmId2, Args2),
          reply(From, Reply),
@@ -1278,7 +1280,7 @@ startEpmCall(CycleData, Module, CurStatus, CurState, Debug, CallbackFun, Event, 
                terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, [Event])
          end;
       _ ->
-         receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHib)
+         ?MODULE:receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHib)
    end.
 
 startEnterCall(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEvents, IsPostpone, IsHibernate, DoAfter) ->
@@ -1442,7 +1444,7 @@ handleEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEve
 handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, CallbackForm, From) ->
    case Result of
       {noreply, NewState} ->
-         receiveIng(CycleData, Module, CurStatus, NewState, Debug, false);
+         ?MODULE:receiveIng(CycleData, Module, CurStatus, NewState, Debug, false);
       {noreply, NewState, Option} ->
          case Option of
             hibernate ->
@@ -1455,7 +1457,7 @@ handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result,
       {reply, Reply, NewState} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
-         receiveIng(CycleData, Module, CurStatus, NewState, NewDebug, false);
+         ?MODULE:receiveIng(CycleData, Module, CurStatus, NewState, NewDebug, false);
       {reply, Reply, NewState, Option} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
