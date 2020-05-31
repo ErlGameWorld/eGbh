@@ -50,10 +50,10 @@
 % 简写备注**********************************
 % isPostpone         isPos
 % isHibernate        isHib
-%
+
 % nextEvent          nextE
 % nextStatus         nextS
-%
+
 % keepStatus         kpS
 % keepStatusState    kpS_S
 % repeatStatus       reS
