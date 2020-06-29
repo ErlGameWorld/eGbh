@@ -45,8 +45,6 @@
    , epm_log/1
 ]).
 
--export([receiveIng/6]).
-
 % 简写备注**********************************
 % isPostpone         isPos
 % isHibernate        isHib
@@ -363,7 +361,7 @@ start_link(ServerName, Module, Args, Opts) ->
 -spec start_monitor(Module :: module(), Args :: term(), Opts :: [startOpt()]) -> startRet().
 start_monitor(Module, Args, Opts) ->
    gen:start(?MODULE, monitor, Module, Args, Opts).
-%%
+
 -spec start_monitor(ServerName :: serverName(), Module :: module(), Args :: term(), Opts :: [startOpt()]) -> startRet().
 start_monitor(ServerName, Module, Args, Opts) ->
    gen:start(?MODULE, monitor, ServerName, Module, Args, Opts).
@@ -475,7 +473,7 @@ system_continue(Parent, Debug, {CycleData, Module, CurStatus, CurState, IsHib}) 
       IsHib ->
          proc_lib:hibernate(?MODULE, wakeupFromHib, [NewCycleData, Module, CurStatus, CurState, Debug, IsHib]);
       true ->
-         ?MODULE:receiveIng(NewCycleData, Module, CurStatus, CurState, Debug, IsHib)
+         receiveIng(NewCycleData, Module, CurStatus, CurState, Debug, IsHib)
    end.
 
 system_terminate(Reason, Parent, Debug, {CycleData, Module, CurStatus, CurState, _IsHib}) ->
@@ -1129,7 +1127,7 @@ updateParent(Parent, #cycleData{parent = OldParent} = CycleData) ->
 %%% Internal callbacks
 wakeupFromHib(CycleData, Module, CurStatus, CurState, Debug, IsHib) ->
    %% 这是一条新消息，唤醒了我们，因此我们必须立即收到它
-   ?MODULE:receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHib).
+   receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHib).
 
 %%%==========================================================================
 %% Entry point for system_continue/3
@@ -1138,7 +1136,7 @@ reLoopEntry(CycleData, Module, CurStatus, CurState, Debug, IsHib) ->
       IsHib ->
          proc_lib:hibernate(?MODULE, wakeupFromHib, [CycleData, Module, CurStatus, CurState, Debug, IsHib]);
       true ->
-         ?MODULE:receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHib)
+         receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHib)
    end.
 
 %% 接收新的消息
@@ -1250,7 +1248,7 @@ matchEpmCallMsg(#cycleData{epmHers = EpmHers} = CycleData, Module, CurStatus, Cu
       {'$deleteEpm', EpmHandler, Args} ->
          {Reply, NewEpmHers} = doDeleteEpm(EpmHers, EpmHandler, Args),
          reply(From, Reply),
-         ?MODULE:receiveIng(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, false);
+         receiveIng(CycleData#cycleData{epmHers = NewEpmHers}, Module, CurStatus, CurState, NewDebug, false);
       {'$swapEpm', EpmId1, Args1, EpmId2, Args2} ->
          {Reply, NewEpmHers, IsHib} = doSwapEpm(EpmHers, EpmId1, Args1, EpmId2, Args2),
          reply(From, Reply),
@@ -1293,7 +1291,7 @@ startEpmCall(CycleData, Module, CurStatus, CurState, Debug, CallbackFun, Event, 
                terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, [Event])
          end;
       _ ->
-         ?MODULE:receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHib)
+         receiveIng(CycleData, Module, CurStatus, CurState, Debug, IsHib)
    end.
 
 startEnterCall(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter) ->
@@ -1457,7 +1455,7 @@ handleEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEve
 handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result, CallbackForm, From) ->
    case Result of
       {noreply, NewState} ->
-         ?MODULE:receiveIng(CycleData, Module, CurStatus, NewState, Debug, false);
+         receiveIng(CycleData, Module, CurStatus, NewState, Debug, false);
       {noreply, NewState, Option} ->
          case Option of
             hibernate ->
@@ -1470,7 +1468,7 @@ handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result,
       {reply, Reply, NewState} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
-         ?MODULE:receiveIng(CycleData, Module, CurStatus, NewState, NewDebug, false);
+         receiveIng(CycleData, Module, CurStatus, NewState, NewDebug, false);
       {reply, Reply, NewState, Option} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
