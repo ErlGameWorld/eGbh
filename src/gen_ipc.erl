@@ -1084,9 +1084,9 @@ epm_log(#{label := {gen_ipc, epm_terminate}, handler := Handler, name := SName, 
    "** Last event was: ~tp~n"
    "** When handler state == ~tp~n"
    "** Reason == ~tp~n", [Handler, SName, LastIn, State, Reason1]};
-epm_log(#{label := {gen_ipc, no_handle_info}, module := Mod, message := Msg}) ->
+epm_log(#{label := {gen_ipc, no_handle_info}, module := Module, message := Msg}) ->
    {"** Undefined handle_info in ~tp~n"
-   "** Unhandled message: ~tp~n", [Mod, Msg]}.
+   "** Unhandled message: ~tp~n", [Module, Msg]}.
 
 epmStopAll(EpmHers) ->
    FunFor =
