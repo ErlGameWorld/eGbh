@@ -123,6 +123,24 @@ enterLoopOpt().
 {'ok', {pid(), reference()}} |
 {'error', term()}.
 
+-type timeoutAction() ::
+timeoutNewAction() |
+timeoutCancelAction() |
+timeoutUpdateAction().
+
+-type timeoutNewAction() ::
+{{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term()} |                                        % Set the generic_timeout option
+{{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |        % Set the generic_timeout option
+
+-type timeoutCancelAction() ::
+{'c_gTimeout', Name :: term()} |
+
+-type timeoutUpdateAction() ::
+{{'u_gTimeout', Name :: term()}, EventContent :: term()} |
+
+-type timer() :: #{TimeoutType :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
+-type action() ::  timeout() | hibernate | {doAfter, term()} | timeoutAction()
+
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% start stop API start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 -spec start(Module :: module(), Args :: term(), Opts :: [startOpt()]) -> startRet().
