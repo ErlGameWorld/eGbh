@@ -38,39 +38,35 @@
 
 -define(STACKTRACE(), element(2, erlang:process_info(self(), current_stacktrace))).
 
-%%%=========================================================================
-%%%  API
-%%%=========================================================================
 
 -callback init(Args :: term()) ->
    {ok, State :: term()} |
-   {ok, State :: term(), timeout() |
+   {ok, State :: term(), action()} |
    {stop, Reason :: term()} |
-   ignore |
-   hibernate |
-   {doAfter, term()}}.
+   ignore.
+
 
 -callback handleCall(Request :: term(), From :: {pid(), Tag :: term()}, State :: term()) ->
    {reply, Reply :: term(), NewState :: term()} |
-   {reply, Reply :: term(), NewState :: term(), timeout() | hibernate | {doAfter, term()}} |
+   {reply, Reply :: term(), NewState :: term(), action() | action()} |
    {noreply, NewState :: term()} |
-   {noreply, NewState :: term(), timeout() | hibernate | {doAfter, term()}} |
+   {noreply, NewState :: term(), action() | action()} |
    {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleCast(Request :: term(), State :: term()) ->
    {noreply, NewState :: term()} |
-   {noreply, NewState :: term(), timeout() | hibernate | {doAfter, term()}} |
+   {noreply, NewState :: term(), action() | action()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleInfo(Info :: timeout | term(), State :: term()) ->
    {noreply, NewState :: term()} |
-   {noreply, NewState :: term(), timeout() | hibernate | {doAfter, term()}} |
+   {noreply, NewState :: term(), action() | action()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleAfter(Info :: term(), State :: term()) ->
    {noreply, NewState :: term()} |
-   {noreply, NewState :: term(), timeout() | hibernate | {doAfter, term()}} |
+   {noreply, NewState :: term(), action() | action()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback terminate(Reason :: (normal | shutdown | {shutdown, term()} |term()), State :: term()) ->
@@ -123,23 +119,29 @@ enterLoopOpt().
 {'ok', {pid(), reference()}} |
 {'error', term()}.
 
+-type action() ::
+timeout() |
+hibernate |
+{'doAfter', Args :: term()} |
+timeoutAction().
+
 -type timeoutAction() ::
 timeoutNewAction() |
 timeoutCancelAction() |
 timeoutUpdateAction().
 
 -type timeoutNewAction() ::
-{{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term()} |                                        % Set the generic_timeout option
-{{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |        % Set the generic_timeout option
-
--type timeoutCancelAction() ::
-{'c_gTimeout', Name :: term()} |
+{'nTimeout', Name :: term(), Time :: timeouts(), EventContent :: term()} |
+{'nTimeout', Name :: term(), Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])}.
 
 -type timeoutUpdateAction() ::
-{{'u_gTimeout', Name :: term()}, EventContent :: term()} |
+{'uTimeout', Name :: term(), EventContent :: term()}.
 
--type timer() :: #{TimeoutType :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
--type action() ::  timeout() | hibernate | {doAfter, term()} | timeoutAction()
+-type timeoutCancelAction() ::
+{'cTimeout', Name :: term()}.
+
+-type timer() :: #{TimeoutName :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
+
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% start stop API start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
@@ -168,7 +170,6 @@ start_monitor(ServerName, Module, Args, Options) ->
    gen:start(?MODULE, monitor, ServerName, Module, Args, Options).
 
 %%停止通用服务器并等待其终止。如果服务器位于另一个节点上，则将监视该节点。
-
 -spec stop(ServerRef :: serverRef()) -> ok.
 stop(ServerRef) ->
    gen:stop(ServerRef).
@@ -474,61 +475,23 @@ system_get_state([_Name, State, _Mod, _Time, _HibernateAfterTimeout]) ->
 system_replace_state(StateFun, [Name, State, Module, Time, HibernateAfterTimeout]) ->
    NState = StateFun(State),
    {ok, NState, [Name, NState, Module, Time, HibernateAfterTimeout]}.
-
-%%-----------------------------------------------------------------
-%% Format debug messages.  Print them as the call-back module sees
-%% them, not as the real erlang messages.  Use trace for that.
-%%-----------------------------------------------------------------
-print_event(Dev, {in, Msg}, Name) ->
-   case Msg of
-      {'$gen_call', {From, _Tag}, Call} ->
-         io:format(Dev, "*DBG* ~tp got call ~tp from ~tw~n",
-            [Name, Call, From]);
-      {'$gen_cast', Cast} ->
-         io:format(Dev, "*DBG* ~tp got cast ~tp~n",
-            [Name, Cast]);
-      _ ->
-         io:format(Dev, "*DBG* ~tp got ~tp~n", [Name, Msg])
-   end;
-print_event(Dev, {out, Msg, {To, _Tag}, State}, Name) ->
-   io:format(Dev, "*DBG* ~tp sent ~tp to ~tw, new state ~tp~n",
-      [Name, Msg, To, State]);
-print_event(Dev, {noreply, State}, Name) ->
-   io:format(Dev, "*DBG* ~tp new state ~tp~n", [Name, State]);
-print_event(Dev, Event, Name) ->
-   io:format(Dev, "*DBG* ~tp dbg  ~tp~n", [Name, Event]).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-%%-----------------------------------------------------------------
-%% enter_loop(Module, Options, State, <ServerName>, <TimeOut>) ->_
-%%
-%% Description: Makes an existing process into a gen_server.
-%%              The calling process will enter the gen_server receive
-%%              loop and become a gen_server process.
-%%              The process *must* have been started using one of the
-%%              start functions in proc_lib, see proc_lib(3).
-%%              The user is responsible for any initialization of the
-%%              process, including registering a name for it.
-%%-----------------------------------------------------------------
--spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()]) -> no_return().
-enter_loop(Module, State, Opts) ->
-   enter_loop(Module, State, Opts, self(), infinity).
-
--spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], serverName() | timeout()) -> no_return().
-enter_loop(Module, State, Opts, ServerNameOrTimeout) ->
-   if is_integer(ServerNameOrTimeout) orelse ServerNameOrTimeout == infinity ->
-      enter_loop(Module, State, Opts, ServerNameOrTimeout, infinity);
+start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
+   if node() =:= nonode@nohost, Node =/= nonode@nohost ->
+      Ref = make_ref(),
+      self() ! {'DOWN', Ref, process, {Name, Node}, noconnection},
+      {Node, Ref};
       true ->
-         enter_loop(Module, State, Opts, self(), ServerNameOrTimeout)
+         case catch erlang:monitor(process, {Name, Node}) of
+            {'EXIT', _} ->
+               %% Remote node is R6
+               monitor_node(Node, true),
+               Node;
+            Ref when is_reference(Ref) ->
+               {Node, Ref}
+         end
    end.
-
--spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), timeout()) -> no_return().
-enter_loop(Module, State, Opts, ServerName, Timeout) ->
-   Name = gen:get_proc_name(ServerName),
-   Parent = gen:get_parent(),
-   Debug = gen:debug_options(Name, Opts),
-   HibernateAfterTimeout = gen:hibernate_after(Opts),
-   loopEntry(Timeout, Parent, Name, State, Module, HibernateAfterTimeout, Debug).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 doModuleInit(Module, Args) ->
@@ -549,10 +512,10 @@ init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
    case doModuleInit(Module, Args) of
       {ok, State} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(infinity, Parent, Name, State, Module, HibernateAfterTimeout, Debug);
-      {ok, State, Timeout} ->
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{});
+      {ok, State, Action} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Timeout, Parent, Name, State, Module, HibernateAfterTimeout, Debug);
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, Action);
       {stop, Reason} ->
          % 为了保持一致性，我们必须确保在
          % %%父进程收到有关失败的通知之前，必须先注销%%注册名称（如果有）。
@@ -573,6 +536,88 @@ init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
          proc_lib:init_ack(Starter, {error, Error}),
          exit(Error)
    end.
+
+
+%%-----------------------------------------------------------------
+%% enter_loop(Module, Options, State, <ServerName>, <TimeOut>) ->_
+%%
+%% Description: Makes an existing process into a gen_server.
+%%              The calling process will enter the gen_server receive
+%%              loop and become a gen_server process.
+%%              The process *must* have been started using one of the
+%%              start functions in proc_lib, see proc_lib(3).
+%%              The user is responsible for any initialization of the
+%%              process, including registering a name for it.
+%%-----------------------------------------------------------------
+-spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()]) -> no_return().
+enter_loop(Module, State, Opts) ->
+   enter_loop(Module, State, Opts, self(), infinity).
+
+-spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], serverName() | pid()) -> no_return().
+enter_loop(Module, State, Opts, ServerName) ->
+   enter_loop(Module, State, Opts, ServerName, infinity).
+
+
+-spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), action() | [action()]) -> no_return().
+enter_loop(Module, State, Opts, ServerName, Action) ->
+   Name = gen:get_proc_name(ServerName),
+   Parent = gen:get_parent(),
+   Debug = gen:debug_options(Name, Opts),
+   HibernateAfterTimeout = gen:hibernate_after(Opts),
+   loopEntry(Parent, Name, State, Module, HibernateAfterTimeout, Debug, #{}, Action).
+
+loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers) ->
+   receive
+      Msg ->
+         case Msg of
+            {'$gen_call', From, Request} ->
+               matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, From, Request);
+            {'$gen_cast', Cast} ->
+               matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Cast);
+            {timeout, TimerRef, TimeoutName} ->
+               case Timers of
+                  #{TimeoutName := {TimerRef, TimeoutMsg}} ->
+                     NewTimer = maps:remove(TimeoutName, Timers),
+                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, NewTimer, TimeoutMsg);
+                  _ ->
+                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Msg)
+               end;
+            {system, PidFrom, Request} ->
+               %% 不返回但尾递归调用 system_continue/3
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, [Name, CurState, Module, Time, HibernateAfterTimeout], Hib);
+
+            {'EXIT', Parent, Reason} ->
+                 terminate(Reason, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers);
+            _ ->
+               matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Msg)
+         end
+   after HibernateAfterTimeout ->
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [CycleData, Module, CurStatus, CurState, Debug, IsHib])
+   end.
+
+loopEntry(hibernate, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
+   proc_lib:hibernate(?MODULE, wake_hib, [Parent, Name, State, Module, HibernateAfterTimeout, Debug]);
+
+loopEntry({doAfter, Continue} = Msg, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
+   Reply = try_dispatch(Module, handleAfter, Continue, State),
+   case Debug of
+      [] ->
+         handle_common_reply(Reply, Parent, Name, undefined, Msg, Module,
+            HibernateAfterTimeout, State);
+      _ ->
+         Debug1 = sys:handle_debug(Debug, fun print_event/3, Name, Msg),
+         handle_common_reply(Reply, Parent, Name, undefined, Msg, Module,
+            HibernateAfterTimeout, State, Debug1)
+   end;
+loopEntry(Time, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
+   Msg =
+      receive
+         Input ->
+            Input
+      after Time ->
+         timeout
+      end,
+   decode_msg(Msg, Parent, Name, State, Module, Time, HibernateAfterTimeout, Debug, false).
 
 loopEntry(infinity, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
    receive
@@ -626,27 +671,6 @@ decode_msg(Msg, Parent, Name, State, Module, Time, HibernateAfterTimeout, Debug,
          Debug1 = sys:handle_debug(Debug, fun print_event/3,
             Name, {in, Msg}),
          handle_msg(Msg, Parent, Name, State, Module, HibernateAfterTimeout, Debug1)
-   end.
-
-
-%%% ---------------------------------------------------
-%%% Monitor functions
-%%% ---------------------------------------------------
-
-start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
-   if node() =:= nonode@nohost, Node =/= nonode@nohost ->
-      Ref = make_ref(),
-      self() ! {'DOWN', Ref, process, {Name, Node}, noconnection},
-      {Node, Ref};
-      true ->
-         case catch erlang:monitor(process, {Name, Node}) of
-            {'EXIT', _} ->
-               %% Remote node is R6
-               monitor_node(Node, true),
-               Node;
-            Ref when is_reference(Ref) ->
-               {Node, Ref}
-         end
    end.
 
 %% ---------------------------------------------------
@@ -811,6 +835,91 @@ reply(Name, From, Reply, State, Debug) ->
    reply(From, Reply),
    sys:handle_debug(Debug, fun print_event/3, Name,
       {out, Reply, From, State}).
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+loopTimeoutsList([], Timers, _CycleData, Debug, TimeoutEvents) ->
+   {Timers, TimeoutEvents, Debug};
+loopTimeoutsList([OneTimeout | LeftTimeouts], Timers, CycleData, Debug, TimeoutEvents) ->
+   case OneTimeout of
+      {TimeoutType, Time, TimeoutMsg, Options} ->
+         case Time of
+            infinity ->
+               NewTimers = doCancelTimer(TimeoutType, Timers),
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents);
+            0 ->
+               NewTimers = doCancelTimer(TimeoutType, Timers),
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, [{TimeoutType, TimeoutMsg} | TimeoutEvents]);
+            _ ->
+               TimerRef = erlang:start_timer(Time, self(), TimeoutType, Options),
+               NewDebug = ?SYS_DEBUG(Debug, CycleData, {start_timer, {TimeoutType, Time, TimeoutMsg, Options}}),
+               NewTimers = doRegisterTimer(TimeoutType, TimerRef, TimeoutMsg, Timers),
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, NewDebug, TimeoutEvents)
+         end;
+      {TimeoutType, Time, TimeoutMsg} ->
+         case Time of
+            infinity ->
+               NewTimers = doCancelTimer(TimeoutType, Timers),
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents);
+            0 ->
+               NewTimers = doCancelTimer(TimeoutType, Timers),
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, [{TimeoutType, TimeoutMsg} | TimeoutEvents]);
+            _ ->
+               TimerRef = erlang:start_timer(Time, self(), TimeoutType),
+               NewDebug = ?SYS_DEBUG(Debug, CycleData, {start_timer, {TimeoutType, Time, TimeoutMsg, []}}),
+               NewTimers = doRegisterTimer(TimeoutType, TimerRef, TimeoutMsg, Timers),
+               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, NewDebug, TimeoutEvents)
+         end;
+      {UpdateTimeoutType, NewTimeoutMsg} ->
+         NewTimers = doUpdateTimer(UpdateTimeoutType, NewTimeoutMsg, Timers),
+         loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents);
+      CancelTimeoutType ->
+         NewTimers = doCancelTimer(CancelTimeoutType, Timers),
+         loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents)
+   end.
+
+
+doRegisterTimer(TimeoutType, NewTimerRef, TimeoutMsg, Timers) ->
+   case Timers of
+      #{TimeoutType := {OldTimerRef, _OldTimeMsg}} ->
+         TemTimers = cancelTimer(TimeoutType, OldTimerRef, Timers),
+         TemTimers#{TimeoutType => {NewTimerRef, TimeoutMsg}};
+      _ ->
+         Timers#{TimeoutType => {NewTimerRef, TimeoutMsg}}
+   end.
+
+doCancelTimer(TimeoutType, Timers) ->
+   case Timers of
+      #{TimeoutType := {TimerRef, _TimeoutMsg}} ->
+         cancelTimer(TimeoutType, TimerRef, Timers);
+      _ ->
+         Timers
+   end.
+
+doUpdateTimer(TimeoutType, Timers, TimeoutMsg) ->
+   case Timers of
+      #{TimeoutType := {TimerRef, _OldTimeoutMsg}} ->
+         Timers#{TimeoutType := {TimerRef, TimeoutMsg}};
+      _ ->
+         Timers
+   end.
+
+cancelTimer(TimeoutType, TimerRef, Timers) ->
+   case erlang:cancel_timer(TimerRef) of
+      false ->
+         %% 找不到计时器，我们还没有看到超时消息
+         receive
+            {timeout, TimerRef, TimeoutType} ->
+               %% 丢弃该超时消息
+               ok
+         after 0 ->
+            ok
+         end;
+      _ ->
+         %% Timer 已经运行了
+         ok
+   end,
+   maps:remove(TimeoutType, Timers).
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
 %%% ---------------------------------------------------
@@ -1172,3 +1281,26 @@ format_status(Opt, Module, PDict, State) ->
       _ ->
          DefStatus
    end.
+
+%%-----------------------------------------------------------------
+%% Format debug messages.  Print them as the call-back module sees
+%% them, not as the real erlang messages.  Use trace for that.
+%%-----------------------------------------------------------------
+print_event(Dev, {in, Msg}, Name) ->
+   case Msg of
+      {'$gen_call', {From, _Tag}, Call} ->
+         io:format(Dev, "*DBG* ~tp got call ~tp from ~tw~n",
+            [Name, Call, From]);
+      {'$gen_cast', Cast} ->
+         io:format(Dev, "*DBG* ~tp got cast ~tp~n",
+            [Name, Cast]);
+      _ ->
+         io:format(Dev, "*DBG* ~tp got ~tp~n", [Name, Msg])
+   end;
+print_event(Dev, {out, Msg, {To, _Tag}, State}, Name) ->
+   io:format(Dev, "*DBG* ~tp sent ~tp to ~tw, new state ~tp~n",
+      [Name, Msg, To, State]);
+print_event(Dev, {noreply, State}, Name) ->
+   io:format(Dev, "*DBG* ~tp new state ~tp~n", [Name, State]);
+print_event(Dev, Event, Name) ->
+   io:format(Dev, "*DBG* ~tp dbg  ~tp~n", [Name, Event]).
