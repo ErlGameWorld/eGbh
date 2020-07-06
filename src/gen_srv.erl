@@ -38,6 +38,16 @@
 
 -define(STACKTRACE(), element(2, erlang:process_info(self(), current_stacktrace))).
 
+%% debug 调试相关宏定义
+-define(NOT_DEBUG, []).
+-define(SYS_DEBUG(Debug, Name, Msg),
+   case Debug of
+      ?NOT_DEBUG ->
+         Debug;
+      _ ->
+         sys:handle_debug(Debug, fun print_event/3, Name, Msg)
+   end).
+
 
 -callback init(Args :: term()) ->
    {ok, State :: term()} |
@@ -46,7 +56,7 @@
    ignore.
 
 
--callback handleCall(Request :: term(), From :: {pid(), Tag :: term()}, State :: term()) ->
+-callback handleCall(Request :: term(), State :: term(), From :: {pid(), Tag :: term()}) ->
    {reply, Reply :: term(), NewState :: term()} |
    {reply, Reply :: term(), NewState :: term(), action() | action()} |
    {noreply, NewState :: term()} |
@@ -83,7 +93,9 @@
    Status :: term().
 
 -optional_callbacks([
-handleInfo/2
+handleCall/3
+, handleCast/2
+, handleInfo/2
 , handleAfter/2
 , terminate/2
 , code_change/3
@@ -456,7 +468,7 @@ rec_nodes_rest(_Tag, [], _Name, Badnodes, Replies) ->
 %% Callback functions for system messages handling.
 %%-----------------------------------------------------------------
 system_continue(Parent, Debug, [Name, State, Module, Time, HibernateAfterTimeout]) ->
-   loopEntry(Time, Parent, Name, State, Module, HibernateAfterTimeout, Debug).
+   receiveIng(Time, Parent, Name, State, Module, HibernateAfterTimeout, Debug).
 
 -spec system_terminate(_, _, _, [_]) -> no_return().
 
@@ -512,7 +524,7 @@ init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
    case doModuleInit(Module, Args) of
       {ok, State} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{});
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, false);
       {ok, State, Action} ->
          proc_lib:init_ack(Starter, {ok, self()}),
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, Action);
@@ -564,9 +576,12 @@ enter_loop(Module, State, Opts, ServerName, Action) ->
    Parent = gen:get_parent(),
    Debug = gen:debug_options(Name, Opts),
    HibernateAfterTimeout = gen:hibernate_after(Opts),
-   loopEntry(Parent, Name, State, Module, HibernateAfterTimeout, Debug, #{}, Action).
+   loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, Action).
 
-loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers) ->
+loopEntry(Parent, Name, State, Module, HibernateAfterTimeout, Debug, Timers, Action) ->
+   ok.
+
+receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib) ->
    receive
       Msg ->
          case Msg of
@@ -584,257 +599,92 @@ loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers) 
                end;
             {system, PidFrom, Request} ->
                %% 不返回但尾递归调用 system_continue/3
-               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, [Name, CurState, Module, Time, HibernateAfterTimeout], Hib);
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, [Name, Module, HibernateAfterTimeout,  CurState, Timers], IsHib);
 
             {'EXIT', Parent, Reason} ->
-                 terminate(Reason, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers);
+                 terminate(Reason, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, Msg);
             _ ->
                matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Msg)
          end
    after HibernateAfterTimeout ->
-         proc_lib:hibernate(?MODULE, wakeupFromHib, [CycleData, Module, CurStatus, CurState, Debug, IsHib])
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout,CurState, Debug, Timers])
    end.
 
-loopEntry(hibernate, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   proc_lib:hibernate(?MODULE, wake_hib, [Parent, Name, State, Module, HibernateAfterTimeout, Debug]);
-
-loopEntry({doAfter, Continue} = Msg, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   Reply = try_dispatch(Module, handleAfter, Continue, State),
-   case Debug of
-      [] ->
-         handle_common_reply(Reply, Parent, Name, undefined, Msg, Module,
-            HibernateAfterTimeout, State);
-      _ ->
-         Debug1 = sys:handle_debug(Debug, fun print_event/3, Name, Msg),
-         handle_common_reply(Reply, Parent, Name, undefined, Msg, Module,
-            HibernateAfterTimeout, State, Debug1)
-   end;
-loopEntry(Time, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   Msg =
-      receive
-         Input ->
-            Input
-      after Time ->
-         timeout
-      end,
-   decode_msg(Msg, Parent, Name, State, Module, Time, HibernateAfterTimeout, Debug, false).
-
-loopEntry(infinity, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   receive
-      Msg ->
-         decode_msg(Msg, Parent, Name, State, Module, infinity, HibernateAfterTimeout, Debug, false)
-   after HibernateAfterTimeout ->
-      loopEntry(hibernate, Parent, Name, State, Module, HibernateAfterTimeout, Debug)
-   end;
-
-loopEntry(hibernate, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   proc_lib:hibernate(?MODULE, wake_hib, [Parent, Name, State, Module, HibernateAfterTimeout, Debug]);
-
-loopEntry({doAfter, Continue} = Msg, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   Reply = try_dispatch(Module, handleAfter, Continue, State),
-   case Debug of
-      [] ->
-         handle_common_reply(Reply, Parent, Name, undefined, Msg, Module,
-            HibernateAfterTimeout, State);
-      _ ->
-         Debug1 = sys:handle_debug(Debug, fun print_event/3, Name, Msg),
-         handle_common_reply(Reply, Parent, Name, undefined, Msg, Module,
-            HibernateAfterTimeout, State, Debug1)
-   end;
-loopEntry(Time, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   Msg =
-      receive
-         Input ->
-            Input
-      after Time ->
-         timeout
-      end,
-   decode_msg(Msg, Parent, Name, State, Module, Time, HibernateAfterTimeout, Debug, false).
-
-wakeupFromHib(Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   Msg = receive
-            Input ->
-               Input
-         end,
-   decode_msg(Msg, Parent, Name, State, Module, hibernate, HibernateAfterTimeout, Debug, true).
-
-decode_msg(Msg, Parent, Name, State, Module, Time, HibernateAfterTimeout, Debug, Hib) ->
-   case Msg of
-      {system, From, Req} ->
-         sys:handle_system_msg(Req, From, Parent, ?MODULE, Debug,
-            [Name, State, Module, Time, HibernateAfterTimeout], Hib);
-      {'EXIT', Parent, Reason} ->
-         terminate(Reason, ?STACKTRACE(), Name, undefined, Msg, Module, State, Debug);
-      _Msg when Debug =:= [] ->
-         handle_msg(Msg, Parent, Name, State, Module, HibernateAfterTimeout);
-      _Msg ->
-         Debug1 = sys:handle_debug(Debug, fun print_event/3,
-            Name, {in, Msg}),
-         handle_msg(Msg, Parent, Name, State, Module, HibernateAfterTimeout, Debug1)
-   end.
-
-%% ---------------------------------------------------
-%% Helper functions for try-catch of callbacks.
-%% Returns the return value of the callback, or
-%% {'EXIT', Class, Reason, Stack} (if an exception occurs)
-%%
-%% The Class, Reason and Stack are given to erlang:raise/3
-%% to make sure proc_lib receives the proper reasons and
-%% stacktraces.
-%% ---------------------------------------------------
-
-try_dispatch({'$gen_cast', Msg}, Module, State) ->
-   try_dispatch(Module, handle_cast, Msg, State);
-try_dispatch(Info, Module, State) ->
-   try_dispatch(Module, handle_info, Info, State).
-
-try_dispatch(Module, Func, Msg, State) ->
-   try
-      {ok, Module:Func(Msg, State)}
+matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, From, Request) ->
+   MsgEvent = {{call, From}, Request},
+   NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
+   try Module:handleCall(Request, CurState, From) of
+      Result ->
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, From)
    catch
-      throw:R ->
-         {ok, R};
-      error:undef = R:Stacktrace when Func == handle_info ->
-         case erlang:function_exported(Module, handle_info, 2) of
-            false ->
-               ?LOG_WARNING(
-                  #{label=>{gen_server, no_handle_info},
-                     module=>Module,
-                     message=>Msg},
-                  #{domain=>[otp],
-                     report_cb=>fun gen_server:format_log/2,
-                     error_logger=>
-                     #{tag=>warning_msg,
-                        report_cb=>fun gen_server:format_log/1}}),
-               {ok, {noreply, State}};
-            true ->
-               {'EXIT', error, R, Stacktrace}
-         end;
-      Class:R:Stacktrace ->
-         {'EXIT', Class, R, Stacktrace}
+      throw:Result ->
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, From);
+      Class:Reason:Stacktrace ->
+         terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
    end.
 
-try_handle_call(Module, Msg, From, State) ->
-   try
-      {ok, Module:handle_call(Msg, From, State)}
+matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Cast) ->
+   MsgEvent = {cast, Cast},
+   NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
+   try Module:handleCast(Cast, CurState) of
+      Result ->
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, false)
    catch
-      throw:R ->
-         {ok, R};
-      Class:R:Stacktrace ->
-         {'EXIT', Class, R, Stacktrace}
+      throw:Result ->
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, false);
+      Class:Reason:Stacktrace ->
+         terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
    end.
 
-try_terminate(Module, Reason, State) ->
-   case erlang:function_exported(Module, terminate, 2) of
-      true ->
-         try
-            {ok, Module:terminate(Reason, State)}
-         catch
-            throw:R ->
-               {ok, R};
-            Class:R:Stacktrace ->
-               {'EXIT', Class, R, Stacktrace}
-         end;
-      false ->
-         {ok, ok}
+matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Msg) ->
+   MsgEvent = {info, Msg},
+   NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
+   try Module:handleInfo(Msg, CurState) of
+      Result ->
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, false)
+   catch
+      throw:Result ->
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, false);
+      Class:Reason:Stacktrace ->
+         terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
    end.
 
+doAfterCall(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, TimeoutEvent, IsHib, Args) ->
+   MsgEvent = {doAfter, Args},
+   NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
+   try Module:handleAfter(Args, CurState) of
+      Result ->
+         handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, TimeoutEvent, IsHib, Result)
+   catch
+      throw:Result ->
+         handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, TimeoutEvent, IsHib, Result);
+      Class:Reason:Stacktrace ->
+         terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
+   end.
 
-%%% ---------------------------------------------------
-%%% Message handling functions
-%%% ---------------------------------------------------
-
-handle_msg({'$gen_call', From, Msg}, Parent, Name, State, Module, HibernateAfterTimeout) ->
-   Result = try_handle_call(Module, Msg, From, State),
+handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Result, From) ->
    case Result of
-      {ok, {reply, Reply, NState}} ->
+      {noreply, NewState} ->
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, false);
+      {reply, Reply, NewState} ->
          reply(From, Reply),
-         loopEntry(infinity, Parent, Name, NState, Module, HibernateAfterTimeout, []);
-      {ok, {reply, Reply, NState, Time1}} ->
-         reply(From, Reply),
-         loopEntry(Time1, Parent, Name, NState, Module, HibernateAfterTimeout, []);
-      {ok, {noreply, NState}} ->
-         loopEntry(infinity, Parent, Name, NState, Module, HibernateAfterTimeout, []);
-      {ok, {noreply, NState, Time1}} ->
-         loopEntry(Time1, Parent, Name, NState, Module, HibernateAfterTimeout, []);
-      {ok, {stop, Reason, Reply, NState}} ->
-         try
-            terminate(Reason, ?STACKTRACE(), Name, From, Msg, Module, NState, [])
-         after
-            reply(From, Reply)
-         end;
-      Other -> handle_common_reply(Other, Parent, Name, From, Msg, Module, HibernateAfterTimeout, State)
-   end;
-handle_msg(Msg, Parent, Name, State, Module, HibernateAfterTimeout) ->
-   Reply = try_dispatch(Msg, Module, State),
-   handle_common_reply(Reply, Parent, Name, undefined, Msg, Module, HibernateAfterTimeout, State).
-
-handle_msg({'$gen_call', From, Msg}, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   Result = try_handle_call(Module, Msg, From, State),
-   case Result of
-      {ok, {reply, Reply, NState}} ->
-         Debug1 = reply(Name, From, Reply, NState, Debug),
-         loopEntry(infinity, Parent, Name, NState, Module, HibernateAfterTimeout, Debug1);
-      {ok, {reply, Reply, NState, Time1}} ->
-         Debug1 = reply(Name, From, Reply, NState, Debug),
-         loopEntry(Time1, Parent, Name, NState, Module, HibernateAfterTimeout, Debug1);
-      {ok, {noreply, NState}} ->
-         Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
-            {noreply, NState}),
-         loopEntry(infinity, Parent, Name, NState, Module, HibernateAfterTimeout, Debug1);
-      {ok, {noreply, NState, Time1}} ->
-         Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
-            {noreply, NState}),
-         loopEntry(Time1, Parent, Name, NState, Module, HibernateAfterTimeout, Debug1);
-      {ok, {stop, Reason, Reply, NState}} ->
-         try
-            terminate(Reason, ?STACKTRACE(), Name, From, Msg, Module, NState, Debug)
-         after
-            _ = reply(Name, From, Reply, NState, Debug)
-         end;
-      Other ->
-         handle_common_reply(Other, Parent, Name, From, Msg, Module, HibernateAfterTimeout, State, Debug)
-   end;
-handle_msg(Msg, Parent, Name, State, Module, HibernateAfterTimeout, Debug) ->
-   Reply = try_dispatch(Msg, Module, State),
-   handle_common_reply(Reply, Parent, Name, undefined, Msg, Module, HibernateAfterTimeout, State, Debug).
-
-handle_common_reply(Reply, Parent, Name, From, Msg, Module, HibernateAfterTimeout, State) ->
-   case Reply of
-      {ok, {noreply, NState}} ->
-         loopEntry(infinity, Parent, Name, NState, Module, HibernateAfterTimeout, []);
-      {ok, {noreply, NState, Time1}} ->
-         loopEntry(Time1, Parent, Name, NState, Module, HibernateAfterTimeout, []);
-      {ok, {stop, Reason, NState}} ->
-         terminate(Reason, ?STACKTRACE(), Name, From, Msg, Module, NState, []);
-      {'EXIT', Class, Reason, Stacktrace} ->
-         terminate(Class, Reason, Stacktrace, Name, From, Msg, Module, State, []);
-      {ok, BadReply} ->
-         terminate({bad_return_value, BadReply}, ?STACKTRACE(), Name, From, Msg, Module, State, [])
+         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, false);
+      {noreply, NewState , Action } ->
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, Action);
+      {stop, Reason, NewState} ->
+         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, );
+         ok;
+      {reply, Reply, NewState, Action} ->
+         ok;
+      {stop, Reason, Reply, NewState} ->
+         ok
    end.
 
-handle_common_reply(Reply, Parent, Name, From, Msg, Module, HibernateAfterTimeout, State, Debug) ->
-   case Reply of
-      {ok, {noreply, NState}} ->
-         Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
-            {noreply, NState}),
-         loopEntry(infinity, Parent, Name, NState, Module, HibernateAfterTimeout, Debug1);
-      {ok, {noreply, NState, Time1}} ->
-         Debug1 = sys:handle_debug(Debug, fun print_event/3, Name,
-            {noreply, NState}),
-         loopEntry(Time1, Parent, Name, NState, Module, HibernateAfterTimeout, Debug1);
-      {ok, {stop, Reason, NState}} ->
-         terminate(Reason, ?STACKTRACE(), Name, From, Msg, Module, NState, Debug);
-      {'EXIT', Class, Reason, Stacktrace} ->
-         terminate(Class, Reason, Stacktrace, Name, From, Msg, Module, State, Debug);
-      {ok, BadReply} ->
-         terminate({bad_return_value, BadReply}, ?STACKTRACE(), Name, From, Msg, Module, State, Debug)
-   end.
 
 reply(Name, From, Reply, State, Debug) ->
    reply(From, Reply),
-   sys:handle_debug(Debug, fun print_event/3, Name,
-      {out, Reply, From, State}).
+   sys:handle_debug(Debug, fun print_event/3, Name, {out, Reply, From, State}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 loopTimeoutsList([], Timers, _CycleData, Debug, TimeoutEvents) ->
