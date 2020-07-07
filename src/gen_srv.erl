@@ -57,6 +57,7 @@
 
 
 -callback handleCall(Request :: term(), State :: term(), From :: {pid(), Tag :: term()}) ->
+   ok |
    {reply, Reply :: term(), NewState :: term()} |
    {reply, Reply :: term(), NewState :: term(), action() | action()} |
    {noreply, NewState :: term()} |
@@ -65,16 +66,19 @@
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleCast(Request :: term(), State :: term()) ->
+   ok |
    {noreply, NewState :: term()} |
    {noreply, NewState :: term(), action() | action()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleInfo(Info :: timeout | term(), State :: term()) ->
+   ok |
    {noreply, NewState :: term()} |
    {noreply, NewState :: term(), action() | action()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleAfter(Info :: term(), State :: term()) ->
+   ok |
    {noreply, NewState :: term()} |
    {noreply, NewState :: term(), action() | action()} |
    {stop, Reason :: term(), NewState :: term()}.
@@ -527,7 +531,7 @@ init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, false);
       {ok, State, Action} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, Action);
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Action));
       {stop, Reason} ->
          % 为了保持一致性，我们必须确保在
          % %%父进程收到有关失败的通知之前，必须先注销%%注册名称（如果有）。
@@ -576,7 +580,7 @@ enter_loop(Module, State, Opts, ServerName, Action) ->
    Parent = gen:get_parent(),
    Debug = gen:debug_options(Name, Opts),
    HibernateAfterTimeout = gen:hibernate_after(Opts),
-   loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, Action).
+   loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Action)).
 
 loopEntry(Parent, Name, State, Module, HibernateAfterTimeout, Debug, Timers, Action) ->
    ok.
@@ -649,21 +653,23 @@ matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timer
          terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
    end.
 
-doAfterCall(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, TimeoutEvent, IsHib, Args) ->
+doAfterCall(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, LeftAction, Args) ->
    MsgEvent = {doAfter, Args},
    NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
    try Module:handleAfter(Args, CurState) of
       Result ->
-         handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, TimeoutEvent, IsHib, Result)
+         handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, LeftAction, Result)
    catch
       throw:Result ->
-         handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, TimeoutEvent, IsHib, Result);
+         handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, LeftAction, Result);
       Class:Reason:Stacktrace ->
          terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
    end.
 
 handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Result, From) ->
    case Result of
+      ok ->
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, false);
       {noreply, NewState} ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, false);
       {reply, Reply, NewState} ->
@@ -671,20 +677,30 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, R
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, false);
       {noreply, NewState , Action } ->
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, Action);
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, listify(Action));
       {stop, Reason, NewState} ->
-         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, );
-         ok;
+         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop});
       {reply, Reply, NewState, Action} ->
-         ok;
+         reply(From, Reply),
+         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, listify(Action));
       {stop, Reason, Reply, NewState} ->
-         ok
+         reply(From, Reply),
+         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
+         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop_reply})
    end.
 
-
-reply(Name, From, Reply, State, Debug) ->
-   reply(From, Reply),
-   sys:handle_debug(Debug, fun print_event/3, Name, {out, Reply, From, State}).
+handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, LeftAction, Result) ->
+   case Result of
+      ok ->
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, LeftAction);
+      {noreply, NewState} ->
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, LeftAction);
+      {noreply, NewState, Action} ->
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, listify(Action) ++ LeftAction);
+      {stop, Reason, NewState} ->
+         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop_reply})
+   end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 loopTimeoutsList([], Timers, _CycleData, Debug, TimeoutEvents) ->
@@ -769,6 +785,11 @@ cancelTimer(TimeoutType, TimerRef, Timers) ->
          ok
    end,
    maps:remove(TimeoutType, Timers).
+
+listify(Item) when is_list(Item) ->
+   Item;
+listify(Item) ->
+   [Item].
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
