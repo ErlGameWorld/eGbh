@@ -29,7 +29,7 @@
    , format_status/2
 
    %% Internal callbacks
-   , wakeupFromHib/6
+   , wakeupFromHib/8
 
    %% logger callback
    , format_log/1, format_log/2
@@ -97,66 +97,69 @@
    Status :: term().
 
 -optional_callbacks([
-handleCall/3
-, handleCast/2
-, handleInfo/2
-, handleAfter/2
-, terminate/2
-, code_change/3
-, formatStatus/2
+   handleCall/3
+   , handleCast/2
+   , handleInfo/2
+   , handleAfter/2
+   , terminate/2
+   , code_change/3
+   , formatStatus/2
 ]).
 
 -type serverName() ::
-{'local', atom()} |
-{'global', GlobalName :: term()} |
-{'via', RegMod :: module(), Name :: term()}.
+   {'local', atom()} |
+   {'global', GlobalName :: term()} |
+   {'via', RegMod :: module(), Name :: term()}.
 
 -type serverRef() ::
-pid()
-| (LocalName :: atom())
-| {Name :: atom(), Node :: atom()}
-| {'global', GlobalName :: term()}
-| {'via', RegMod :: module(), ViaName :: term()}.
+   pid()
+   | (LocalName :: atom())
+   | {Name :: atom(), Node :: atom()}
+   | {'global', GlobalName :: term()}
+   | {'via', RegMod :: module(), ViaName :: term()}.
 
 -type requestId() :: term().
 
 -type startOpt() ::
-{'timeout', Time :: timeout()} |
-{'spawn_opt', [proc_lib:spawn_option()]} |
-enterLoopOpt().
+   {'timeout', Time :: timeout()} |
+   {'spawn_opt', [proc_lib:spawn_option()]} |
+   enterLoopOpt().
 
 -type enterLoopOpt() ::
-{'debug', Debugs :: [sys:debug_option()]} |
-{'hibernate_after', HibernateAfterTimeout :: timeout()}.
+   {'debug', Debugs :: [sys:debug_option()]} |
+   {'hibernate_after', HibernateAfterTimeout :: timeout()}.
 
 -type startRet() ::
-'ignore' |
-{'ok', pid()} |
-{'ok', {pid(), reference()}} |
-{'error', term()}.
+   'ignore' |
+   {'ok', pid()} |
+   {'ok', {pid(), reference()}} |
+   {'error', term()}.
 
 -type action() ::
-timeout() |
-hibernate |
-{'doAfter', Args :: term()} |
-timeoutAction().
+   timeout() |
+   hibernate |
+   {'doAfter', Args :: term()} |
+   timeoutAction().
 
 -type timeoutAction() ::
-timeoutNewAction() |
-timeoutCancelAction() |
-timeoutUpdateAction().
+   timeoutNewAction() |
+   timeoutCancelAction() |
+   timeoutUpdateAction().
 
 -type timeoutNewAction() ::
-{'nTimeout', Name :: term(), Time :: timeouts(), EventContent :: term()} |
-{'nTimeout', Name :: term(), Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])}.
+   {'nTimeout', Name :: term(), Time :: timeouts(), TimeoutMsg :: term()} |
+   {'nTimeout', Name :: term(), Time :: timeouts(), TimeoutMsg :: term(), Options :: ([timeoutOption()])}.
 
 -type timeoutUpdateAction() ::
-{'uTimeout', Name :: term(), EventContent :: term()}.
+   {'uTimeout', Name :: term(), TimeoutMsg :: term()}.
 
 -type timeoutCancelAction() ::
-{'cTimeout', Name :: term()}.
+   {'cTimeout', Name :: term()}.
 
--type timer() :: #{TimeoutName :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
+-type timeouts() :: Time :: timeout() | integer().
+-type timeoutOption() :: {abs, Abs :: boolean()}.
+
+%% -type timer() :: #{TimeoutName :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
 
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% start stop API start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -471,26 +474,30 @@ rec_nodes_rest(_Tag, [], _Name, Badnodes, Replies) ->
 %%-----------------------------------------------------------------
 %% Callback functions for system messages handling.
 %%-----------------------------------------------------------------
-system_continue(Parent, Debug, [Name, State, Module, Time, HibernateAfterTimeout]) ->
-   receiveIng(Time, Parent, Name, State, Module, HibernateAfterTimeout, Debug).
+system_continue(Parent, Debug, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib]) ->
+   case IsHib of
+      true ->
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib]);
+      _ ->
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib)
+   end.
 
 -spec system_terminate(_, _, _, [_]) -> no_return().
+system_terminate(Reason, _Parent, Debug, [Name, Module, _HibernateAfterTimeout, CurState, Timers, _IsHib]) ->
+   terminate(exit, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, []).
 
-system_terminate(Reason, _Parent, Debug, [Name, State, Module, _Time, _HibernateAfterTimeout]) ->
-   terminate(Reason, ?STACKTRACE(), Name, undefined, [], Module, State, Debug).
-
-system_code_change([Name, State, Module, Time, HibernateAfterTimeout], _Module, OldVsn, Extra) ->
-   case catch Module:code_change(OldVsn, State, Extra) of
-      {ok, NewState} -> {ok, [Name, NewState, Module, Time, HibernateAfterTimeout]};
+system_code_change([Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib], _Module, OldVsn, Extra) ->
+   case catch Module:code_change(OldVsn, CurState, Extra) of
+      {ok, NewState} -> {ok, [Name, Module, HibernateAfterTimeout, NewState, Timers, IsHib]};
       Else -> Else
    end.
 
-system_get_state([_Name, State, _Mod, _Time, _HibernateAfterTimeout]) ->
-   {ok, State}.
+system_get_state([_Name, _Module, _HibernateAfterTimeout, CurState, _Timers, _IsHib]) ->
+   {ok, CurState}.
 
-system_replace_state(StateFun, [Name, State, Module, Time, HibernateAfterTimeout]) ->
-   NState = StateFun(State),
-   {ok, NState, [Name, NState, Module, Time, HibernateAfterTimeout]}.
+system_replace_state(StateFun, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib]) ->
+   NewState = StateFun(CurState),
+   {ok, NewState, [Name, Module, HibernateAfterTimeout, NewState, Timers, IsHib]}.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
@@ -582,7 +589,28 @@ enter_loop(Module, State, Opts, ServerName, Action) ->
    HibernateAfterTimeout = gen:hibernate_after(Opts),
    loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Action)).
 
-loopEntry(Parent, Name, State, Module, HibernateAfterTimeout, Debug, Timers, Action) ->
+%%% Internal callbacks
+wakeupFromHib(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib) ->
+   %% 这是一条新消息，唤醒了我们，因此我们必须立即收到它
+   receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib).
+
+loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Actions) ->
+   case doParseAL(Actions, Name, Debug, false, false, Timers) of
+      {error, ErrorContent} ->
+         terminate(error, ErrorContent, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, []);
+      {NewDebug, IsHib, DoAfter, NewTimers} ->
+         case DoAfter of
+            {doAfter, Args} ->
+               doAfterCall(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, listHib(IsHib), Args);
+            _ ->
+               case IsHib of
+                  true ->
+                     proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, IsHib]);
+                  _ ->
+                     receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, false)
+               end
+         end
+   end,
    ok.
 
 receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib) ->
@@ -603,15 +631,15 @@ receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers,
                end;
             {system, PidFrom, Request} ->
                %% 不返回但尾递归调用 system_continue/3
-               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, [Name, Module, HibernateAfterTimeout,  CurState, Timers], IsHib);
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib], IsHib);
 
             {'EXIT', Parent, Reason} ->
-                 terminate(Reason, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, Msg);
+               terminate(Reason, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, Msg);
             _ ->
                matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Msg)
          end
    after HibernateAfterTimeout ->
-         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout,CurState, Debug, Timers])
+      proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers])
    end.
 
 matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, From, Request) ->
@@ -676,7 +704,7 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, R
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, false);
-      {noreply, NewState , Action } ->
+      {noreply, NewState, Action} ->
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, listify(Action));
       {stop, Reason, NewState} ->
          terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop});
@@ -687,7 +715,7 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, R
       {stop, Reason, Reply, NewState} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
-         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop_reply})
+         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, NewDebug, Timers, {return, stop_reply})
    end.
 
 handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, LeftAction, Result) ->
@@ -702,47 +730,55 @@ handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, L
          terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop_reply})
    end.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-loopTimeoutsList([], Timers, _CycleData, Debug, TimeoutEvents) ->
-   {Timers, TimeoutEvents, Debug};
-loopTimeoutsList([OneTimeout | LeftTimeouts], Timers, CycleData, Debug, TimeoutEvents) ->
-   case OneTimeout of
-      {TimeoutType, Time, TimeoutMsg, Options} ->
+%% loopParseActionsList
+doParseAL([], _Name, Debug, IsHib, DoAfter, Timers) ->
+   {Debug, IsHib, DoAfter, Timers};
+doParseAL([OneAction | LeftActions], Name, Debug, IsHib, DoAfter, Timers) ->
+   case OneAction of
+      hibernate ->
+         doParseAL(LeftActions, Name, Debug, true, DoAfter, Timers);
+      {'doAfter', _Args} ->
+         doParseAL(LeftActions, Name, Debug, IsHib, OneAction, Timers);
+      {'nTimeout', TimeoutName, Time, TimeoutMsg, Options} ->
          case Time of
             infinity ->
-               NewTimers = doCancelTimer(TimeoutType, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents);
-            0 ->
-               NewTimers = doCancelTimer(TimeoutType, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, [{TimeoutType, TimeoutMsg} | TimeoutEvents]);
+               NewTimers = doCancelTimer(TimeoutName, Timers),
+               doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, NewTimers);
             _ ->
-               TimerRef = erlang:start_timer(Time, self(), TimeoutType, Options),
-               NewDebug = ?SYS_DEBUG(Debug, CycleData, {start_timer, {TimeoutType, Time, TimeoutMsg, Options}}),
-               NewTimers = doRegisterTimer(TimeoutType, TimerRef, TimeoutMsg, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, NewDebug, TimeoutEvents)
+               TimerRef = erlang:start_timer(Time, self(), TimeoutName, Options),
+               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {TimeoutName, Time, TimeoutMsg, Options}}),
+               NewTimers = doRegisterTimer(TimeoutName, TimerRef, TimeoutMsg, Timers),
+               doParseAL(LeftActions, Name, NewDebug, IsHib, DoAfter, NewTimers)
          end;
-      {TimeoutType, Time, TimeoutMsg} ->
+      {'nTimeout', TimeoutName, Time, TimeoutMsg} ->
          case Time of
             infinity ->
-               NewTimers = doCancelTimer(TimeoutType, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents);
-            0 ->
-               NewTimers = doCancelTimer(TimeoutType, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, [{TimeoutType, TimeoutMsg} | TimeoutEvents]);
+               NewTimers = doCancelTimer(TimeoutName, Timers),
+               doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, NewTimers);
             _ ->
-               TimerRef = erlang:start_timer(Time, self(), TimeoutType),
-               NewDebug = ?SYS_DEBUG(Debug, CycleData, {start_timer, {TimeoutType, Time, TimeoutMsg, []}}),
-               NewTimers = doRegisterTimer(TimeoutType, TimerRef, TimeoutMsg, Timers),
-               loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, NewDebug, TimeoutEvents)
+               TimerRef = erlang:start_timer(Time, self(), TimeoutName),
+               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {TimeoutName, Time, TimeoutMsg, []}}),
+               NewTimers = doRegisterTimer(TimeoutName, TimerRef, TimeoutMsg, Timers),
+               doParseAL(LeftActions, Name, NewDebug, IsHib, DoAfter, NewTimers)
          end;
-      {UpdateTimeoutType, NewTimeoutMsg} ->
-         NewTimers = doUpdateTimer(UpdateTimeoutType, NewTimeoutMsg, Timers),
-         loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents);
-      CancelTimeoutType ->
-         NewTimers = doCancelTimer(CancelTimeoutType, Timers),
-         loopTimeoutsList(LeftTimeouts, NewTimers, CycleData, Debug, TimeoutEvents)
+      {'uTimeout', TimeoutName, NewTimeoutMsg} ->
+         NewTimers = doUpdateTimer(TimeoutName, NewTimeoutMsg, Timers),
+         doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, NewTimers);
+      {'cTimeout', TimeoutName} ->
+         NewTimers = doCancelTimer(TimeoutName, Timers),
+         doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, NewTimers);
+      infinity ->
+         ok;
+      Timeout when is_integer(Timeout) ->
+         TimerRef = erlang:start_timer(Timeout, self(), timeout),
+         NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {timeout, Timeout, timeout, []}}),
+         NewTimers = doRegisterTimer(timeout, TimerRef, timeout, Timers),
+         doParseAL(LeftActions, Name, NewDebug, IsHib, DoAfter, NewTimers);
+      _ ->
+         {error, {bad_ActionType, OneAction}}
    end.
 
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 doRegisterTimer(TimeoutType, NewTimerRef, TimeoutMsg, Timers) ->
    case Timers of
@@ -771,18 +807,15 @@ doUpdateTimer(TimeoutType, Timers, TimeoutMsg) ->
 
 cancelTimer(TimeoutType, TimerRef, Timers) ->
    case erlang:cancel_timer(TimerRef) of
-      false ->
-         %% 找不到计时器，我们还没有看到超时消息
+      false ->                                     % 找不到计时器，我们还没有看到超时消息
          receive
             {timeout, TimerRef, TimeoutType} ->
-               %% 丢弃该超时消息
-               ok
+               ok                                  % 丢弃该超时消息
          after 0 ->
             ok
          end;
       _ ->
-         %% Timer 已经运行了
-         ok
+         ok                                        % Timer 已经运行了
    end,
    maps:remove(TimeoutType, Timers).
 
@@ -790,6 +823,11 @@ listify(Item) when is_list(Item) ->
    Item;
 listify(Item) ->
    [Item].
+
+listHib(true) ->
+   [hibernate];
+listHib(_) ->
+   [].
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -809,22 +847,11 @@ listify(Item) ->
 %%% always includes the stacktrace for errors and never
 %%% for exits.
 %%% ---------------------------------------------------
-
--spec terminate(_, _, _, _, _, _, _, _) -> no_return().
-terminate(Reason, Stacktrace, Name, From, Msg, Module, State, Debug) ->
-   terminate(exit, Reason, Stacktrace, Reason, Name, From, Msg, Module, State, Debug).
-
--spec terminate(_, _, _, _, _, _, _, _, _) -> no_return().
-terminate(Class, Reason, Stacktrace, Name, From, Msg, Module, State, Debug) ->
-   ReportReason = {Reason, Stacktrace},
-   terminate(Class, Reason, Stacktrace, ReportReason, Name, From, Msg, Module, State, Debug).
-
--spec terminate(_, _, _, _, _, _, _, _, _, _) -> no_return().
-terminate(Class, Reason, Stacktrace, ReportReason, Name, From, Msg, Module, State, Debug) ->
-   Reply = try_terminate(Module, terminate_reason(Class, Reason, Stacktrace), State),
+terminate(Class, Reason, Stacktrace, Name, Module, CurState, Debug, _Timers, MsgEvent) ->
+   Reply = try_terminate(Module, terminate_reason(Class, Reason, Stacktrace), CurState),
    case Reply of
       {'EXIT', C, R, S} ->
-         error_info({R, S}, Name, From, Msg, Module, State, Debug),
+         error_info({R, S}, Name, undefined, MsgEvent, Module, CurState, Debug),
          erlang:raise(C, R, S);
       _ ->
          case {Class, Reason} of
@@ -832,7 +859,7 @@ terminate(Class, Reason, Stacktrace, ReportReason, Name, From, Msg, Module, Stat
             {exit, shutdown} -> ok;
             {exit, {shutdown, _}} -> ok;
             _ ->
-               error_info(ReportReason, Name, From, Msg, Module, State, Debug)
+               error_info(Reason, Name, undefined, MsgEvent, Module, CurState, Debug)
          end
    end,
    case Stacktrace of
@@ -840,6 +867,21 @@ terminate(Class, Reason, Stacktrace, ReportReason, Name, From, Msg, Module, Stat
          erlang:Class(Reason);
       _ ->
          erlang:raise(Class, Reason, Stacktrace)
+   end.
+
+try_terminate(Mod, Reason, State) ->
+   case erlang:function_exported(Mod, terminate, 2) of
+      true ->
+         try
+            {ok, Mod:terminate(Reason, State)}
+         catch
+            throw:R ->
+               {ok, R};
+            Class:R:Stacktrace ->
+               {'EXIT', Class, R, Stacktrace}
+         end;
+      false ->
+         {ok, ok}
    end.
 
 terminate_reason(error, Reason, Stacktrace) -> {Reason, Stacktrace};
@@ -1119,10 +1161,11 @@ format_status(Opt, StatusData) ->
    [PDict, SysState, Parent, Debug, [Name, State, Module, _Time, _HibernateAfterTimeout]] = StatusData,
    Header = gen:format_status_header("Status for generic server", Name),
    Log = sys:get_log(Debug),
-   Specific = case format_status(Opt, Module, PDict, State) of
-                 S when is_list(S) -> S;
-                 S -> [S]
-              end,
+   Specific =
+      case format_status(Opt, Module, PDict, State) of
+         S when is_list(S) -> S;
+         S -> [S]
+      end,
    [{header, Header},
       {data, [{"Status", SysState},
          {"Parent", Parent},
@@ -1139,10 +1182,11 @@ format_log_state(Module, Log) ->
     end || Event <- Log].
 
 format_status(Opt, Module, PDict, State) ->
-   DefStatus = case Opt of
-                  terminate -> State;
-                  _ -> [{data, [{"State", State}]}]
-               end,
+   DefStatus =
+      case Opt of
+         terminate -> State;
+         _ -> [{data, [{"State", State}]}]
+      end,
    case erlang:function_exported(Module, format_status, 2) of
       true ->
          case catch Module:format_status(Opt, [PDict, State]) of
@@ -1159,10 +1203,10 @@ format_status(Opt, Module, PDict, State) ->
 %%-----------------------------------------------------------------
 print_event(Dev, {in, Msg}, Name) ->
    case Msg of
-      {'$gen_call', {From, _Tag}, Call} ->
+      {{call, {From, _Tag}}, Call} ->
          io:format(Dev, "*DBG* ~tp got call ~tp from ~tw~n",
             [Name, Call, From]);
-      {'$gen_cast', Cast} ->
+      {cast, Cast} ->
          io:format(Dev, "*DBG* ~tp got cast ~tp~n",
             [Name, Cast]);
       _ ->
