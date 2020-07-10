@@ -48,6 +48,47 @@
          sys:handle_debug(Debug, fun print_event/3, Name, Msg)
    end).
 
+-type serverName() ::
+   {'local', atom()} |
+   {'global', GlobalName :: term()} |
+   {'via', RegMod :: module(), Name :: term()}.
+
+-type serverRef() ::
+   pid()
+   | (LocalName :: atom())
+   | {Name :: atom(), Node :: atom()}
+   | {'global', GlobalName :: term()}
+   | {'via', RegMod :: module(), ViaName :: term()}.
+
+-type requestId() :: term().
+
+-type startOpt() ::
+   {'timeout', Time :: timeout()} |
+   {'spawn_opt', [proc_lib:spawn_option()]} |
+   enterLoopOpt().
+
+-type enterLoopOpt() ::
+   {'debug', Debugs :: [sys:debug_option()]} |
+   {'hibernate_after', HibernateAfterTimeout :: timeout()}.
+
+-type startRet() ::
+   'ignore' |
+   {'ok', pid()} |
+   {'ok', {pid(), reference()}} |
+   {'error', term()}.
+
+-type action() ::
+   timeout() |
+   hibernate |
+   {'doAfter', Args :: term()} |
+   {'nTimeout', Name :: term(), Time :: timeouts(), TimeoutMsg :: term()} |
+   {'nTimeout', Name :: term(), Time :: timeouts(), TimeoutMsg :: term(), Options :: ([timeoutOption()])} |
+   {'uTimeout', Name :: term(), TimeoutMsg :: term()} |
+   {'cTimeout', Name :: term()}.
+
+-type timeouts() :: Time :: timeout() | integer().
+-type timeoutOption() :: {abs, Abs :: boolean()}.
+%% -type timer() :: #{TimeoutName :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
 
 -callback init(Args :: term()) ->
    {ok, State :: term()} |
@@ -106,62 +147,6 @@
    , formatStatus/2
 ]).
 
--type serverName() ::
-   {'local', atom()} |
-   {'global', GlobalName :: term()} |
-   {'via', RegMod :: module(), Name :: term()}.
-
--type serverRef() ::
-   pid()
-   | (LocalName :: atom())
-   | {Name :: atom(), Node :: atom()}
-   | {'global', GlobalName :: term()}
-   | {'via', RegMod :: module(), ViaName :: term()}.
-
--type requestId() :: term().
-
--type startOpt() ::
-   {'timeout', Time :: timeout()} |
-   {'spawn_opt', [proc_lib:spawn_option()]} |
-   enterLoopOpt().
-
--type enterLoopOpt() ::
-   {'debug', Debugs :: [sys:debug_option()]} |
-   {'hibernate_after', HibernateAfterTimeout :: timeout()}.
-
--type startRet() ::
-   'ignore' |
-   {'ok', pid()} |
-   {'ok', {pid(), reference()}} |
-   {'error', term()}.
-
--type action() ::
-   timeout() |
-   hibernate |
-   {'doAfter', Args :: term()} |
-   timeoutAction().
-
--type timeoutAction() ::
-   timeoutNewAction() |
-   timeoutCancelAction() |
-   timeoutUpdateAction().
-
--type timeoutNewAction() ::
-   {'nTimeout', Name :: term(), Time :: timeouts(), TimeoutMsg :: term()} |
-   {'nTimeout', Name :: term(), Time :: timeouts(), TimeoutMsg :: term(), Options :: ([timeoutOption()])}.
-
--type timeoutUpdateAction() ::
-   {'uTimeout', Name :: term(), TimeoutMsg :: term()}.
-
--type timeoutCancelAction() ::
-   {'cTimeout', Name :: term()}.
-
--type timeouts() :: Time :: timeout() | integer().
--type timeoutOption() :: {abs, Abs :: boolean()}.
-
-%% -type timer() :: #{TimeoutName :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
-
-
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% start stop API start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 -spec start(Module :: module(), Args :: term(), Opts :: [startOpt()]) -> startRet().
@@ -198,6 +183,133 @@ stop(ServerRef, Reason, Timeout) ->
    gen:stop(ServerRef, Reason, Timeout).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% start stop API end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+doModuleInit(Module, Args) ->
+   try
+      Module:init(Args)
+   catch
+      throw:Ret -> Ret;
+      Class:Reason:Stacktrace -> {'EXIT', Class, Reason, Stacktrace}
+   end.
+
+init_it(Starter, self, ServerRef, Module, Args, Options) ->
+   init_it(Starter, self(), ServerRef, Module, Args, Options);
+init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
+   Name = gen:name(ServerRef),
+   Debug = gen:debug_options(Name, Options),
+   HibernateAfterTimeout = gen:hibernate_after(Options),
+
+   case doModuleInit(Module, Args) of
+      {ok, State} ->
+         proc_lib:init_ack(Starter, {ok, self()}),
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, false);
+      {ok, State, Action} ->
+         proc_lib:init_ack(Starter, {ok, self()}),
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Action));
+      {stop, Reason} ->
+         % 为了保持一致性，我们必须确保在
+         % %%父进程收到有关失败的通知之前，必须先注销%%注册名称（如果有）。
+         % %%（否则，如果父进程立即%%再次尝试启动该进程，则其父进程可能会收到％already_started错误）。
+         gen:unregister_name(ServerRef),
+         proc_lib:init_ack(Starter, {error, Reason}),
+         exit(Reason);
+      ignore ->
+         gen:unregister_name(ServerRef),
+         proc_lib:init_ack(Starter, ignore),
+         exit(normal);
+      {'EXIT', Class, Reason, Stacktrace} ->
+         gen:unregister_name(ServerRef),
+         proc_lib:init_ack(Starter, {error, terminate_reason(Class, Reason, Stacktrace)}),
+         erlang:raise(Class, Reason, Stacktrace);
+      _Ret ->
+         Error = {bad_return_value, _Ret},
+         proc_lib:init_ack(Starter, {error, Error}),
+         exit(Error)
+   end.
+
+
+%%-----------------------------------------------------------------
+%% enter_loop(Module, Options, State, <ServerName>, <TimeOut>) ->_
+%%
+%% Description: Makes an existing process into a gen_server.
+%%              The calling process will enter the gen_server receive
+%%              loop and become a gen_server process.
+%%              The process *must* have been started using one of the
+%%              start functions in proc_lib, see proc_lib(3).
+%%              The user is responsible for any initialization of the
+%%              process, including registering a name for it.
+%%-----------------------------------------------------------------
+-spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()]) -> no_return().
+enter_loop(Module, State, Opts) ->
+   enter_loop(Module, State, Opts, self(), infinity).
+
+-spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], serverName() | pid()) -> no_return().
+enter_loop(Module, State, Opts, ServerName) ->
+   enter_loop(Module, State, Opts, ServerName, infinity).
+
+
+-spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), action() | [action()]) -> no_return().
+enter_loop(Module, State, Opts, ServerName, Action) ->
+   Name = gen:get_proc_name(ServerName),
+   Parent = gen:get_parent(),
+   Debug = gen:debug_options(Name, Opts),
+   HibernateAfterTimeout = gen:hibernate_after(Opts),
+   loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Action)).
+
+%%% Internal callbacks
+wakeupFromHib(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib) ->
+   %% 这是一条新消息，唤醒了我们，因此我们必须立即收到它
+   receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib).
+
+loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Actions) ->
+   case doParseAL(Actions, Name, Debug, false, false, Timers) of
+      {error, ErrorContent} ->
+         terminate(error, ErrorContent, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, []);
+      {NewDebug, IsHib, DoAfter, NewTimers} ->
+         case DoAfter of
+            {doAfter, Args} ->
+               doAfterCall(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, listHib(IsHib), Args);
+            _ ->
+               case IsHib of
+                  true ->
+                     proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, IsHib]);
+                  _ ->
+                     receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, false)
+               end
+         end
+   end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+%%-----------------------------------------------------------------
+%% Callback functions for system messages handling.
+%%-----------------------------------------------------------------
+system_continue(Parent, Debug, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib]) ->
+   case IsHib of
+      true ->
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib]);
+      _ ->
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib)
+   end.
+
+-spec system_terminate(_, _, _, [_]) -> no_return().
+system_terminate(Reason, _Parent, Debug, [Name, Module, _HibernateAfterTimeout, CurState, Timers, _IsHib]) ->
+   terminate(exit, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, []).
+
+system_code_change([Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib], _Module, OldVsn, Extra) ->
+   case catch Module:code_change(OldVsn, CurState, Extra) of
+      {ok, NewState} -> {ok, [Name, Module, HibernateAfterTimeout, NewState, Timers, IsHib]};
+      Else -> Else
+   end.
+
+system_get_state([_Name, _Module, _HibernateAfterTimeout, CurState, _Timers, _IsHib]) ->
+   {ok, CurState}.
+
+system_replace_state(StateFun, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib]) ->
+   NewState = StateFun(CurState),
+   {ok, NewState, [Name, Module, HibernateAfterTimeout, NewState, Timers, IsHib]}.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  start  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% -----------------------------------------------------------------
@@ -467,39 +579,6 @@ rec_nodes_rest(Tag, [N | Tail], Name, Badnodes, Replies) ->
 rec_nodes_rest(_Tag, [], _Name, Badnodes, Replies) ->
    {Replies, Badnodes}.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  end  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-%%-----------------------------------------------------------------
-%% Callback functions for system messages handling.
-%%-----------------------------------------------------------------
-system_continue(Parent, Debug, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib]) ->
-   case IsHib of
-      true ->
-         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib]);
-      _ ->
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib)
-   end.
-
--spec system_terminate(_, _, _, [_]) -> no_return().
-system_terminate(Reason, _Parent, Debug, [Name, Module, _HibernateAfterTimeout, CurState, Timers, _IsHib]) ->
-   terminate(exit, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, []).
-
-system_code_change([Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib], _Module, OldVsn, Extra) ->
-   case catch Module:code_change(OldVsn, CurState, Extra) of
-      {ok, NewState} -> {ok, [Name, Module, HibernateAfterTimeout, NewState, Timers, IsHib]};
-      Else -> Else
-   end.
-
-system_get_state([_Name, _Module, _HibernateAfterTimeout, CurState, _Timers, _IsHib]) ->
-   {ok, CurState}.
-
-system_replace_state(StateFun, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib]) ->
-   NewState = StateFun(CurState),
-   {ok, NewState, [Name, Module, HibernateAfterTimeout, NewState, Timers, IsHib]}.
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
 start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
    if node() =:= nonode@nohost, Node =/= nonode@nohost ->
       Ref = make_ref(),
@@ -516,102 +595,7 @@ start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
          end
    end.
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-doModuleInit(Module, Args) ->
-   try
-      Module:init(Args)
-   catch
-      throw:Ret -> Ret;
-      Class:Reason:Stacktrace -> {'EXIT', Class, Reason, Stacktrace}
-   end.
-
-init_it(Starter, self, ServerRef, Module, Args, Options) ->
-   init_it(Starter, self(), ServerRef, Module, Args, Options);
-init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
-   Name = gen:name(ServerRef),
-   Debug = gen:debug_options(Name, Options),
-   HibernateAfterTimeout = gen:hibernate_after(Options),
-
-   case doModuleInit(Module, Args) of
-      {ok, State} ->
-         proc_lib:init_ack(Starter, {ok, self()}),
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, false);
-      {ok, State, Action} ->
-         proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Action));
-      {stop, Reason} ->
-         % 为了保持一致性，我们必须确保在
-         % %%父进程收到有关失败的通知之前，必须先注销%%注册名称（如果有）。
-         % %%（否则，如果父进程立即%%再次尝试启动该进程，则其父进程可能会收到％already_started错误）。
-         gen:unregister_name(ServerRef),
-         proc_lib:init_ack(Starter, {error, Reason}),
-         exit(Reason);
-      ignore ->
-         gen:unregister_name(ServerRef),
-         proc_lib:init_ack(Starter, ignore),
-         exit(normal);
-      {'EXIT', Class, Reason, Stacktrace} ->
-         gen:unregister_name(ServerRef),
-         proc_lib:init_ack(Starter, {error, terminate_reason(Class, Reason, Stacktrace)}),
-         erlang:raise(Class, Reason, Stacktrace);
-      _Ret ->
-         Error = {bad_return_value, _Ret},
-         proc_lib:init_ack(Starter, {error, Error}),
-         exit(Error)
-   end.
-
-
-%%-----------------------------------------------------------------
-%% enter_loop(Module, Options, State, <ServerName>, <TimeOut>) ->_
-%%
-%% Description: Makes an existing process into a gen_server.
-%%              The calling process will enter the gen_server receive
-%%              loop and become a gen_server process.
-%%              The process *must* have been started using one of the
-%%              start functions in proc_lib, see proc_lib(3).
-%%              The user is responsible for any initialization of the
-%%              process, including registering a name for it.
-%%-----------------------------------------------------------------
--spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()]) -> no_return().
-enter_loop(Module, State, Opts) ->
-   enter_loop(Module, State, Opts, self(), infinity).
-
--spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], serverName() | pid()) -> no_return().
-enter_loop(Module, State, Opts, ServerName) ->
-   enter_loop(Module, State, Opts, ServerName, infinity).
-
-
--spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), action() | [action()]) -> no_return().
-enter_loop(Module, State, Opts, ServerName, Action) ->
-   Name = gen:get_proc_name(ServerName),
-   Parent = gen:get_parent(),
-   Debug = gen:debug_options(Name, Opts),
-   HibernateAfterTimeout = gen:hibernate_after(Opts),
-   loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Action)).
-
-%%% Internal callbacks
-wakeupFromHib(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib) ->
-   %% 这是一条新消息，唤醒了我们，因此我们必须立即收到它
-   receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib).
-
-loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Actions) ->
-   case doParseAL(Actions, Name, Debug, false, false, Timers) of
-      {error, ErrorContent} ->
-         terminate(error, ErrorContent, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, []);
-      {NewDebug, IsHib, DoAfter, NewTimers} ->
-         case DoAfter of
-            {doAfter, Args} ->
-               doAfterCall(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, listHib(IsHib), Args);
-            _ ->
-               case IsHib of
-                  true ->
-                     proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, IsHib]);
-                  _ ->
-                     receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, false)
-               end
-         end
-   end,
-   ok.
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  end  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib) ->
    receive

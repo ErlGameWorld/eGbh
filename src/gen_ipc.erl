@@ -412,7 +412,7 @@ init_it(Starter, Parent, ServerRef, Module, Args, Opts) ->
       {'EXIT', Class, Reason, Stacktrace} ->
          gen:unregister_name(ServerRef),
          proc_lib:init_ack(Starter, {error, Reason}),
-         error_info(Class, Reason, Stacktrace, #cycleData{}, Module, 'Sun_init', '$un_init', Debug, []),
+         error_info(Class, Reason, Stacktrace, #cycleData{}, Module, '$un_init', '$un_init', Debug, []),
          erlang:raise(Class, Reason, Stacktrace);
       _Ret ->
          gen:unregister_name(ServerRef),
