@@ -143,10 +143,7 @@
    Status :: term().
 
 -optional_callbacks([
-   handleCall/3
-   , handleCast/2
-   , handleInfo/2
-   , handleAfter/2
+   handleAfter/2
    , terminate/2
    , code_change/3
    , formatStatus/2
@@ -335,7 +332,7 @@ call(ServerRef, Request) ->
       {ok, Reply} ->
          Reply
    catch Class:Reason:Stacktrace ->
-         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, Stacktrace)
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, Stacktrace)
    end.
 
 -spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout() |{'clean_timeout', T :: timeout()} | {'dirty_timeout', T :: timeout()}) -> Reply :: term().
@@ -344,14 +341,14 @@ call(ServerRef, Request, infinity) ->
       {ok, Reply} ->
          Reply
    catch Class:Reason:Stacktrace ->
-         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, Stacktrace)
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, Stacktrace)
    end;
 call(ServerRef, Request, {dirty_timeout, T} = Timeout) ->
    try gen:call(ServerRef, '$gen_call', Request, T) of
       {ok, Reply} ->
          Reply
    catch Class:Reason:Stacktrace ->
-         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace)
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace)
    end;
 call(ServerRef, Request, {clean_timeout, T} = Timeout) ->
    callClean(ServerRef, Request, Timeout, T);
@@ -510,7 +507,7 @@ reply(Replies) when is_list(Replies) ->
 -spec reply(From :: from(), Reply :: term()) -> ok.
 reply({To, Tag}, Reply) ->
    try To ! {Tag, Reply},
-      ok
+   ok
    catch _:_ ->
       ok
    end.
@@ -871,7 +868,7 @@ listify(Item) ->
 listHib(false) ->
    [];
 listHib(_) ->
-[hibernate].
+   [hibernate].
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 

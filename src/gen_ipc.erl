@@ -164,7 +164,7 @@ eventAction().
    {'u_sTimeout', EventContent :: term()}.
 
 -type replyAction() ::
-   {'reply', From :: from(), Reply :: term()}.
+{'reply', From :: from(), Reply :: term()}.
 
 -type eventCallbackResult() ::
    {'reply', Reply :: term(), NewState :: term()} |                                                                    % 用作gen_server模式时快速响应进入消息接收
@@ -185,7 +185,7 @@ eventAction().
    commonCallbackResult(afterAction()).
 
 -type enterCallbackResult() ::
-   commonCallbackResult(enterAction()).
+commonCallbackResult(enterAction()).
 
 -type commonCallbackResult(ActionType) ::
    {'kpS', NewState :: term()} |                                                                                       % {keep_status,NewData,[]}
@@ -529,7 +529,7 @@ call(ServerRef, Request) ->
       {ok, Reply} ->
          Reply
    catch Class:Reason:Stacktrace ->
-         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, Stacktrace)
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, Stacktrace)
    end.
 
 -spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout() |{'clean_timeout', T :: timeout()} | {'dirty_timeout', T :: timeout()}) -> Reply :: term().
@@ -538,14 +538,14 @@ call(ServerRef, Request, infinity) ->
       {ok, Reply} ->
          Reply
    catch Class:Reason:Stacktrace ->
-         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, Stacktrace)
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, Stacktrace)
    end;
 call(ServerRef, Request, {dirty_timeout, T} = Timeout) ->
    try gen:call(ServerRef, '$gen_call', Request, T) of
       {ok, Reply} ->
          Reply
    catch Class:Reason:Stacktrace ->
-         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace)
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace)
    end;
 call(ServerRef, Request, {clean_timeout, T} = Timeout) ->
    callClean(ServerRef, Request, Timeout, T);
@@ -629,22 +629,22 @@ do_multi_call(Nodes, Name, Request, Timeout) ->
 -spec cast(ServerRef :: serverRef(), Msg :: term()) -> ok.
 cast({global, Name}, Msg) ->
    try global:send(Name, {'$gen_cast', Msg}),
-       ok
+   ok
    catch _:_ -> ok
    end;
 cast({via, RegMod, Name}, Msg) ->
    try RegMod:send(Name, {'$gen_cast', Msg}),
-      ok
+   ok
    catch _:_ -> ok
    end;
 cast({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
    try erlang:send(Dest, {'$gen_cast', Msg}),
-      ok
+   ok
    catch _:_ -> ok
    end;
 cast(Dest, Msg) ->
    try erlang:send(Dest, {'$gen_cast', Msg}),
-      ok
+   ok
    catch _:_ -> ok
    end.
 
@@ -694,11 +694,11 @@ send_nodes(Nodes, Name, Tag, Request) ->
       begin
          Monitor = start_monitor(Node, Name),
          try {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Request},
-            ok
-            catch _:_ -> ok
+         ok
+         catch _:_ -> ok
          end,
          Monitor
-    end || Node <- Nodes, is_atom(Node)
+      end || Node <- Nodes, is_atom(Node)
    ].
 
 rec_nodes(Tag, Nodes, Name, TimerId) ->
@@ -802,7 +802,7 @@ start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
 -spec reply([replyAction(), ...] | replyAction()) -> ok.
 reply({reply, {To, Tag}, Reply}) ->
    try To ! {Tag, Reply},
-      ok
+   ok
    catch _:_ ->
       ok
    end;
@@ -810,7 +810,7 @@ reply(Replies) when is_list(Replies) ->
    [
       begin
          try To ! {Tag, Reply},
-             ok
+         ok
          catch _:_ ->
             ok
          end
@@ -821,7 +821,7 @@ reply(Replies) when is_list(Replies) ->
 -spec reply(From :: from(), Reply :: term()) -> ok.
 reply({To, Tag}, Reply) ->
    try To ! {Tag, Reply},
-      ok
+   ok
    catch _:_ ->
       ok
    end.
@@ -835,7 +835,7 @@ epmRequest({global, Name}, Msg) ->
    end;
 epmRequest({via, RegMod, Name}, Msg) ->
    try RegMod:send(Name, Msg),
-      ok
+   ok
    catch _:_ -> ok
    end;
 epmRequest(EpmSrv, Cmd) ->
@@ -855,7 +855,7 @@ epmRpc(EpmSrv, Cmd) ->
       {ok, Reply} ->
          Reply
    catch Class:Reason:Stacktrace ->
-         erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, infinity]}}, Stacktrace)
+      erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, infinity]}}, Stacktrace)
    end.
 
 epmRpc(EpmSrv, Cmd, Timeout) ->
@@ -863,7 +863,7 @@ epmRpc(EpmSrv, Cmd, Timeout) ->
       {ok, Reply} ->
          Reply
    catch Class:Reason:Stacktrace ->
-         erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, Timeout]}}, Stacktrace)
+      erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, Timeout]}}, Stacktrace)
    end.
 
 -spec call_notify(serverRef(), term()) -> 'ok'.
