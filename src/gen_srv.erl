@@ -770,10 +770,9 @@ doParseAL([OneAction | LeftActions], Name, Debug, IsHib, DoAfter, Timers) ->
       infinity ->
          ok;
       Timeout when is_integer(Timeout) ->
-         TimerRef = erlang:start_timer(Timeout, self(), timeout),
+         erlang:send_after(Timeout, self(), timeout),
          NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {timeout, Timeout, timeout, []}}),
-         NewTimers = doRegisterTimer(timeout, TimerRef, timeout, Timers),
-         doParseAL(LeftActions, Name, NewDebug, IsHib, DoAfter, NewTimers);
+         doParseAL(LeftActions, Name, NewDebug, IsHib, DoAfter, Timers);
       _ ->
          {error, {bad_ActionType, OneAction}}
    end.
