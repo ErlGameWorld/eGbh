@@ -12,7 +12,7 @@
    , stop/1, stop/3
    , call/2, call/3
    , send_request/2, wait_response/2, check_response/2
-   , cast/2, reply/2
+   , cast/2, reply/1, reply/2
    , abcast/2, abcast/3
    , multi_call/2, multi_call/3, multi_call/4
    , enter_loop/3, enter_loop/4, enter_loop/5
@@ -60,8 +60,6 @@
    | {'global', GlobalName :: term()}
    | {'via', RegMod :: module(), ViaName :: term()}.
 
--type requestId() :: term().
-
 -type startOpt() ::
    {'timeout', Time :: timeout()} |
    {'spawn_opt', [proc_lib:spawn_option()]} |
@@ -89,6 +87,13 @@
 -type timeouts() :: Time :: timeout() | integer().
 -type timeoutOption() :: {abs, Abs :: boolean()}.
 %% -type timer() :: #{TimeoutName :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
+
+%% gen:call 发送消息来源进程格式类型
+-type from() :: {To :: pid(), Tag :: term()}.
+-type requestId() :: term().
+
+-type replyAction() ::
+   {'reply', From :: from(), Reply :: term()}.
 
 -callback init(Args :: term()) ->
    {ok, State :: term()} |
@@ -298,9 +303,15 @@ system_terminate(Reason, _Parent, Debug, [Name, Module, _HibernateAfterTimeout, 
    terminate(exit, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, []).
 
 system_code_change([Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib], _Module, OldVsn, Extra) ->
-   case catch Module:code_change(OldVsn, CurState, Extra) of
+   case
+      try Module:code_change(OldVsn, CurState, Extra)
+      catch
+         throw:Result -> Result;
+         _C:_R -> {_R, _R}
+      end
+   of
       {ok, NewState} -> {ok, [Name, Module, HibernateAfterTimeout, NewState, Timers, IsHib]};
-      Else -> Else
+      Error -> Error
    end.
 
 system_get_state([_Name, _Module, _HibernateAfterTimeout, CurState, _Timers, _IsHib]) ->
@@ -318,21 +329,190 @@ system_replace_state(StateFun, [Name, Module, HibernateAfterTimeout, CurState, T
 %% be monitored.
 %% If the client is trapping exits and is linked server termination
 %% is handled here (? Shall we do that here (or rely on timeouts) ?).
-%% -----------------------------------------------------------------
-call(Name, Request) ->
-   case catch gen:call(Name, '$gen_call', Request) of
-      {ok, Res} ->
-         Res;
-      {'EXIT', Reason} ->
-         exit({Reason, {?MODULE, call, [Name, Request]}})
+-spec call(ServerRef :: serverRef(), Request :: term()) -> Reply :: term().
+call(ServerRef, Request) ->
+   try gen:call(ServerRef, '$gen_call', Request) of
+      {ok, Reply} ->
+         Reply
+   catch Class:Reason:Stacktrace ->
+         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, Stacktrace)
    end.
 
-call(Name, Request, Timeout) ->
-   case catch gen:call(Name, '$gen_call', Request, Timeout) of
-      {ok, Res} ->
-         Res;
-      {'EXIT', Reason} ->
-         exit({Reason, {?MODULE, call, [Name, Request, Timeout]}})
+-spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout() |{'clean_timeout', T :: timeout()} | {'dirty_timeout', T :: timeout()}) -> Reply :: term().
+call(ServerRef, Request, infinity) ->
+   try gen:call(ServerRef, '$gen_call', Request, infinity) of
+      {ok, Reply} ->
+         Reply
+   catch Class:Reason:Stacktrace ->
+         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, Stacktrace)
+   end;
+call(ServerRef, Request, {dirty_timeout, T} = Timeout) ->
+   try gen:call(ServerRef, '$gen_call', Request, T) of
+      {ok, Reply} ->
+         Reply
+   catch Class:Reason:Stacktrace ->
+         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace)
+   end;
+call(ServerRef, Request, {clean_timeout, T} = Timeout) ->
+   callClean(ServerRef, Request, Timeout, T);
+call(ServerRef, Request, {_, _} = Timeout) ->
+   erlang:error(badarg, [ServerRef, Request, Timeout]);
+call(ServerRef, Request, Timeout) ->
+   callClean(ServerRef, Request, Timeout, Timeout).
+
+callClean(ServerRef, Request, Timeout, T) ->
+   %% 通过代理过程呼叫服务器以躲避任何较晚的答复
+   Ref = make_ref(),
+   Self = self(),
+   Pid = spawn(
+      fun() ->
+         Self !
+            try gen:call(ServerRef, '$gen_call', Request, T) of
+               Result ->
+                  {Ref, Result}
+            catch Class:Reason:Stacktrace ->
+               {Ref, Class, Reason, Stacktrace}
+            end
+      end),
+   Mref = monitor(process, Pid),
+   receive
+      {Ref, Result} ->
+         demonitor(Mref, [flush]),
+         case Result of
+            {ok, Reply} ->
+               Reply
+         end;
+      {Ref, Class, Reason, Stacktrace} ->
+         demonitor(Mref, [flush]),
+         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace);
+      {'DOWN', Mref, _, _, Reason} ->
+         %% 从理论上讲，有可能在try-of和！之间杀死代理进程。因此，在这种情况下
+         exit(Reason)
+   end.
+
+%%% -----------------------------------------------------------------
+%%% Make a call to servers at several nodes.
+%%% Returns: {[Replies],[BadNodes]}
+%%% A Timeout can be given
+%%%
+%%% A middleman process is used in case late answers arrives after
+%%% the timeout. If they would be allowed to glog the callers message
+%%% queue, it would probably become confused. Late answers will
+%%% now arrive to the terminated middleman and so be discarded.
+%%% -----------------------------------------------------------------
+
+multi_call(Name, Request) when is_atom(Name) ->
+   do_multi_call([node() | nodes()], Name, Request, infinity).
+
+multi_call(Nodes, Name, Request) when is_list(Nodes), is_atom(Name) ->
+   do_multi_call(Nodes, Name, Request, infinity).
+
+multi_call(Nodes, Name, Request, infinity) ->
+   do_multi_call(Nodes, Name, Request, infinity);
+multi_call(Nodes, Name, Request, Timeout) when is_list(Nodes), is_atom(Name), is_integer(Timeout), Timeout >= 0 ->
+   do_multi_call(Nodes, Name, Request, Timeout).
+
+do_multi_call(Nodes, Name, Request, infinity) ->
+   Tag = make_ref(),
+   Monitors = send_nodes(Nodes, Name, Tag, Request),
+   rec_nodes(Tag, Monitors, Name, undefined);
+do_multi_call(Nodes, Name, Request, Timeout) ->
+   Tag = make_ref(),
+   Caller = self(),
+   Receiver = spawn(
+      fun() ->
+         process_flag(trap_exit, true),
+         Mref = erlang:monitor(process, Caller),
+         receive
+            {Caller, Tag} ->
+               Monitors = send_nodes(Nodes, Name, Tag, Request),
+               TimerId = erlang:start_timer(Timeout, self(), ok),
+               Result = rec_nodes(Tag, Monitors, Name, TimerId),
+               exit({self(), Tag, Result});
+            {'DOWN', Mref, _, _, _} ->
+               exit(normal)
+         end
+      end
+   ),
+   Mref = erlang:monitor(process, Receiver),
+   Receiver ! {self(), Tag},
+   receive
+      {'DOWN', Mref, _, _, {Receiver, Tag, Result}} ->
+         Result;
+      {'DOWN', Mref, _, _, Reason} ->
+         exit(Reason)
+   end.
+
+-spec cast(ServerRef :: serverRef(), Msg :: term()) -> ok.
+cast({global, Name}, Msg) ->
+   try global:send(Name, {'$gen_cast', Msg}),
+   ok
+   catch _:_ -> ok
+   end;
+cast({via, RegMod, Name}, Msg) ->
+   try RegMod:send(Name, {'$gen_cast', Msg}),
+   ok
+   catch _:_ -> ok
+   end;
+cast({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
+   try erlang:send(Dest, {'$gen_cast', Msg}),
+   ok
+   catch _:_ -> ok
+   end;
+cast(Dest, Msg) ->
+   try erlang:send(Dest, {'$gen_cast', Msg}),
+   ok
+   catch _:_ -> ok
+   end.
+
+%% 异步广播，不返回任何内容，只是发送“ n”祈祷
+abcast(Name, Msg) when is_atom(Name) ->
+   doAbcast([node() | nodes()], Name, Msg).
+
+abcast(Nodes, Name, Msg) when is_list(Nodes), is_atom(Name) ->
+   doAbcast(Nodes, Name, Msg).
+
+doAbcast(Nodes, Name, Msg) ->
+   [
+      begin
+         try erlang:send({Name, Node}, {'$gen_cast', Msg}),
+         ok
+         catch
+            _:_ -> ok
+         end
+      end || Node <- Nodes
+   ],
+   ok.
+
+%% -----------------------------------------------------------------
+%% Send a reply to the client.
+%% -----------------------------------------------------------------
+%% Reply from a status machine callback to whom awaits in call/2
+-spec reply([replyAction(), ...] | replyAction()) -> ok.
+reply({reply, {To, Tag}, Reply}) ->
+   try To ! {Tag, Reply},
+   ok
+   catch _:_ ->
+      ok
+   end;
+reply(Replies) when is_list(Replies) ->
+   [
+      begin
+         try To ! {Tag, Reply},
+         ok
+         catch _:_ ->
+            ok
+         end
+      end || {reply, {To, Tag}, Reply} <- Replies
+   ],
+   ok.
+
+-spec reply(From :: from(), Reply :: term()) -> ok.
+reply({To, Tag}, Reply) ->
+   try To ! {Tag, Reply},
+      ok
+   catch _:_ ->
+      ok
    end.
 
 %% -----------------------------------------------------------------
@@ -354,136 +534,17 @@ wait_response(RequestId, Timeout) ->
 check_response(Msg, RequestId) ->
    gen:check_response(Msg, RequestId).
 
-%% -----------------------------------------------------------------
-%% Make a cast to a generic server.
-%% -----------------------------------------------------------------
-cast({global, Name}, Request) ->
-   catch global:send(Name, cast_msg(Request)),
-   ok;
-cast({via, Module, Name}, Request) ->
-   catch Module:send(Name, cast_msg(Request)),
-   ok;
-cast({Name, Node} = Dest, Request) when is_atom(Name), is_atom(Node) ->
-   do_cast(Dest, Request);
-cast(Dest, Request) when is_atom(Dest) ->
-   do_cast(Dest, Request);
-cast(Dest, Request) when is_pid(Dest) ->
-   do_cast(Dest, Request).
-
-do_cast(Dest, Request) ->
-   do_send(Dest, cast_msg(Request)),
-   ok.
-
-cast_msg(Request) -> {'$gen_cast', Request}.
-
-%% -----------------------------------------------------------------
-%% Send a reply to the client.
-%% -----------------------------------------------------------------
-reply({To, Tag}, Reply) ->
-   catch To ! {Tag, Reply},
-   ok.
-
-%% -----------------------------------------------------------------
-%% Asynchronous broadcast, returns nothing, it's just send 'n' pray
-%%-----------------------------------------------------------------
-abcast(Name, Request) when is_atom(Name) ->
-   do_abcast([node() | nodes()], Name, cast_msg(Request)).
-
-abcast(Nodes, Name, Request) when is_list(Nodes), is_atom(Name) ->
-   do_abcast(Nodes, Name, cast_msg(Request)).
-
-do_abcast([Node | Nodes], Name, Msg) when is_atom(Node) ->
-   do_send({Name, Node}, Msg),
-   do_abcast(Nodes, Name, Msg);
-do_abcast([], _, _) -> abcast.
-
-%%% -----------------------------------------------------------------
-%%% Make a call to servers at several nodes.
-%%% Returns: {[Replies],[BadNodes]}
-%%% A Timeout can be given
-%%%
-%%% A middleman process is used in case late answers arrives after
-%%% the timeout. If they would be allowed to glog the callers message
-%%% queue, it would probably become confused. Late answers will
-%%% now arrive to the terminated middleman and so be discarded.
-%%% -----------------------------------------------------------------
-multi_call(Name, Req)
-   when is_atom(Name) ->
-   do_multi_call([node() | nodes()], Name, Req, infinity).
-
-multi_call(Nodes, Name, Req)
-   when is_list(Nodes), is_atom(Name) ->
-   do_multi_call(Nodes, Name, Req, infinity).
-
-multi_call(Nodes, Name, Req, infinity) ->
-   do_multi_call(Nodes, Name, Req, infinity);
-multi_call(Nodes, Name, Req, Timeout)
-   when is_list(Nodes), is_atom(Name), is_integer(Timeout), Timeout >= 0 ->
-   do_multi_call(Nodes, Name, Req, Timeout).
-
-%%% ---------------------------------------------------
-%%% Send/receive functions
-%%% ---------------------------------------------------
-do_send(Dest, Msg) ->
-   try erlang:send(Dest, Msg)
-   catch
-      error:_ -> ok
-   end,
-   ok.
-
-do_multi_call(Nodes, Name, Req, infinity) ->
-   Tag = make_ref(),
-   Monitors = send_nodes(Nodes, Name, Tag, Req),
-   rec_nodes(Tag, Monitors, Name, undefined);
-do_multi_call(Nodes, Name, Req, Timeout) ->
-   Tag = make_ref(),
-   Caller = self(),
-   Receiver =
-      spawn(
-         fun() ->
-            %% Middleman process. Should be unsensitive to regular
-            %% exit signals. The sychronization is needed in case
-            %% the receiver would exit before the caller started
-            %% the monitor.
-            process_flag(trap_exit, true),
-            Mref = erlang:monitor(process, Caller),
-            receive
-               {Caller, Tag} ->
-                  Monitors = send_nodes(Nodes, Name, Tag, Req),
-                  TimerId = erlang:start_timer(Timeout, self(), ok),
-                  Result = rec_nodes(Tag, Monitors, Name, TimerId),
-                  exit({self(), Tag, Result});
-               {'DOWN', Mref, _, _, _} ->
-                  %% Caller died before sending us the go-ahead.
-                  %% Give up silently.
-                  exit(normal)
-            end
-         end),
-   Mref = erlang:monitor(process, Receiver),
-   Receiver ! {self(), Tag},
-   receive
-      {'DOWN', Mref, _, _, {Receiver, Tag, Result}} ->
-         Result;
-      {'DOWN', Mref, _, _, Reason} ->
-         %% The middleman code failed. Or someone did
-         %% exit(_, kill) on the middleman process => Reason==killed
-         exit(Reason)
-   end.
-
-send_nodes(Nodes, Name, Tag, Req) ->
-   send_nodes(Nodes, Name, Tag, Req, []).
-
-send_nodes([Node | Tail], Name, Tag, Req, Monitors)
-   when is_atom(Node) ->
-   Monitor = start_monitor(Node, Name),
-   %% Handle non-existing names in rec_nodes.
-   catch {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Req},
-   send_nodes(Tail, Name, Tag, Req, [Monitor | Monitors]);
-send_nodes([_Node | Tail], Name, Tag, Req, Monitors) ->
-   %% Skip non-atom Node
-   send_nodes(Tail, Name, Tag, Req, Monitors);
-send_nodes([], _Name, _Tag, _Req, Monitors) ->
-   Monitors.
+send_nodes(Nodes, Name, Tag, Request) ->
+   [
+      begin
+         Monitor = start_monitor(Node, Name),
+         try {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Request},
+         ok
+         catch _:_ -> ok
+         end,
+         Monitor
+      end || Node <- Nodes, is_atom(Node)
+   ].
 
 %% Against old nodes:
 %% If no reply has been delivered within 2 secs. (per node) check that
@@ -807,10 +868,10 @@ listify(Item) when is_list(Item) ->
 listify(Item) ->
    [Item].
 
-listHib(true) ->
-   [hibernate];
+listHib(false) ->
+   [];
 listHib(_) ->
-   [].
+[hibernate].
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 
@@ -1172,7 +1233,7 @@ format_status(Opt, Module, PDict, State) ->
       end,
    case erlang:function_exported(Module, format_status, 2) of
       true ->
-         case catch Module:format_status(Opt, [PDict, State]) of
+         case catch Module:formatStatus(Opt, [PDict, State]) of
             {'EXIT', _} -> DefStatus;
             Else -> Else
          end;

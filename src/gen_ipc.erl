@@ -484,7 +484,8 @@ system_code_change({CycleData, Module, CurStatus, CurState, IsHib}, _Mod, OldVsn
    case
       try Module:code_change(OldVsn, CurStatus, CurState, Extra)
       catch
-         throw:Result -> Result
+         throw:Result -> Result;
+         _C:_R -> {_R, _R}
       end
    of
       {ok, NewStatus, NewState} ->
@@ -527,8 +528,7 @@ call(ServerRef, Request) ->
    try gen:call(ServerRef, '$gen_call', Request) of
       {ok, Reply} ->
          Reply
-   catch
-      Class:Reason:Stacktrace ->
+   catch Class:Reason:Stacktrace ->
          erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, Stacktrace)
    end.
 
@@ -537,16 +537,14 @@ call(ServerRef, Request, infinity) ->
    try gen:call(ServerRef, '$gen_call', Request, infinity) of
       {ok, Reply} ->
          Reply
-   catch
-      Class:Reason:Stacktrace ->
+   catch Class:Reason:Stacktrace ->
          erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, Stacktrace)
    end;
 call(ServerRef, Request, {dirty_timeout, T} = Timeout) ->
    try gen:call(ServerRef, '$gen_call', Request, T) of
       {ok, Reply} ->
          Reply
-   catch
-      Class:Reason:Stacktrace ->
+   catch Class:Reason:Stacktrace ->
          erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace)
    end;
 call(ServerRef, Request, {clean_timeout, T} = Timeout) ->
@@ -599,7 +597,7 @@ multi_call(Nodes, Name, Request, Timeout) when is_list(Nodes), is_atom(Name), is
 
 do_multi_call(Nodes, Name, Request, infinity) ->
    Tag = make_ref(),
-   Monitors = send_nodes(Nodes, Name, Tag, Request, []),
+   Monitors = send_nodes(Nodes, Name, Tag, Request),
    rec_nodes(Tag, Monitors, Name, undefined);
 do_multi_call(Nodes, Name, Request, Timeout) ->
    Tag = make_ref(),
@@ -610,7 +608,7 @@ do_multi_call(Nodes, Name, Request, Timeout) ->
          Mref = erlang:monitor(process, Caller),
          receive
             {Caller, Tag} ->
-               Monitors = send_nodes(Nodes, Name, Tag, Request, []),
+               Monitors = send_nodes(Nodes, Name, Tag, Request),
                TimerId = erlang:start_timer(Timeout, self(), ok),
                Result = rec_nodes(Tag, Monitors, Name, TimerId),
                exit({self(), Tag, Result});
@@ -627,6 +625,47 @@ do_multi_call(Nodes, Name, Request, Timeout) ->
       {'DOWN', Mref, _, _, Reason} ->
          exit(Reason)
    end.
+
+-spec cast(ServerRef :: serverRef(), Msg :: term()) -> ok.
+cast({global, Name}, Msg) ->
+   try global:send(Name, {'$gen_cast', Msg}),
+       ok
+   catch _:_ -> ok
+   end;
+cast({via, RegMod, Name}, Msg) ->
+   try RegMod:send(Name, {'$gen_cast', Msg}),
+      ok
+   catch _:_ -> ok
+   end;
+cast({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
+   try erlang:send(Dest, {'$gen_cast', Msg}),
+      ok
+   catch _:_ -> ok
+   end;
+cast(Dest, Msg) ->
+   try erlang:send(Dest, {'$gen_cast', Msg}),
+      ok
+   catch _:_ -> ok
+   end.
+
+%% 异步广播，不返回任何内容，只是发送“ n”祈祷
+abcast(Name, Msg) when is_atom(Name) ->
+   doAbcast([node() | nodes()], Name, Msg).
+
+abcast(Nodes, Name, Msg) when is_list(Nodes), is_atom(Name) ->
+   doAbcast(Nodes, Name, Msg).
+
+doAbcast(Nodes, Name, Msg) ->
+   [
+      begin
+         try erlang:send({Name, Node}, {'$gen_cast', Msg}),
+         ok
+         catch
+            _:_ -> ok
+         end
+      end || Node <- Nodes
+   ],
+   ok.
 
 -spec send_request(ServerRef :: serverRef(), Request :: term()) -> RequestId :: requestId().
 send_request(Name, Request) ->
@@ -650,14 +689,17 @@ wait_response(RequestId, Timeout) ->
 check_response(Msg, RequestId) ->
    gen:check_response(Msg, RequestId).
 
-send_nodes([Node | Tail], Name, Tag, Request, Monitors) when is_atom(Node) ->
-   Monitor = start_monitor(Node, Name),
-   catch {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Request},
-   send_nodes(Tail, Name, Tag, Request, [Monitor | Monitors]);
-send_nodes([_Node | Tail], Name, Tag, Request, Monitors) ->
-   send_nodes(Tail, Name, Tag, Request, Monitors);
-send_nodes([], _Name, _Tag, _Req, Monitors) ->
-   Monitors.
+send_nodes(Nodes, Name, Tag, Request) ->
+   [
+      begin
+         Monitor = start_monitor(Node, Name),
+         try {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Request},
+            ok
+            catch _:_ -> ok
+         end,
+         Monitor
+    end || Node <- Nodes, is_atom(Node)
+   ].
 
 rec_nodes(Tag, Nodes, Name, TimerId) ->
    rec_nodes(Tag, Nodes, Name, [], [], 2000, TimerId).
@@ -756,82 +798,45 @@ start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
          end
    end.
 
--spec cast(ServerRef :: serverRef(), Msg :: term()) -> ok.
-cast({global, Name}, Msg) ->
-   try global:send(Name, {'$gen_cast', Msg}) of
-      _ -> ok
-   catch
-      _:_ -> ok
-   end;
-cast({via, RegMod, Name}, Msg) ->
-   try RegMod:send(Name, {'$gen_cast', Msg}) of
-      _ -> ok
-   catch
-      _:_ -> ok
-   end;
-cast({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
-   try
-      erlang:send(Dest, {'$gen_cast', Msg}),
-      ok
-   catch
-      error:_ -> ok
-   end;
-cast(Dest, Msg) ->
-   try
-      erlang:send(Dest, {'$gen_cast', Msg}),
-      ok
-   catch
-      error:_ -> ok
-   end.
-
-%% 异步广播，不返回任何内容，只是发送“ n”祈祷
-abcast(Name, Msg) when is_atom(Name) ->
-   doAbcast([node() | nodes()], Name, Msg).
-
-abcast(Nodes, Name, Msg) when is_list(Nodes), is_atom(Name) ->
-   doAbcast(Nodes, Name, Msg).
-
-doAbcast([Node | Nodes], Name, Msg) when is_atom(Node) ->
-   try
-      erlang:send({Name, Node}, {'$gen_cast', Msg}),
-      ok
-   catch
-      error:_ -> ok
-   end,
-   doAbcast(Nodes, Name, Msg);
-doAbcast([], _, _) -> abcast.
-
 %% Reply from a status machine callback to whom awaits in call/2
--spec reply([replyAction()] | replyAction()) -> ok.
-reply({reply, From, Reply}) ->
-   reply(From, Reply);
+-spec reply([replyAction(), ...] | replyAction()) -> ok.
+reply({reply, {To, Tag}, Reply}) ->
+   try To ! {Tag, Reply},
+      ok
+   catch _:_ ->
+      ok
+   end;
 reply(Replies) when is_list(Replies) ->
-   replies(Replies).
-
-replies([{reply, From, Reply} | Replies]) ->
-   reply(From, Reply),
-   replies(Replies);
-replies([]) ->
+   [
+      begin
+         try To ! {Tag, Reply},
+             ok
+         catch _:_ ->
+            ok
+         end
+      end || {reply, {To, Tag}, Reply} <- Replies
+   ],
    ok.
 
 -spec reply(From :: from(), Reply :: term()) -> ok.
 reply({To, Tag}, Reply) ->
-   catch To ! {Tag, Reply},
-   ok.
+   try To ! {Tag, Reply},
+      ok
+   catch _:_ ->
+      ok
+   end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  end  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen_event  start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 epmRequest({global, Name}, Msg) ->
-   try global:send(Name, Msg) of
-      _ -> ok
-   catch
-      _:_ -> ok
+   try global:send(Name, Msg),
+   ok
+   catch _:_ -> ok
    end;
 epmRequest({via, RegMod, Name}, Msg) ->
-   try RegMod:send(Name, Msg) of
-      _ -> ok
-   catch
-      _:_ -> ok
+   try RegMod:send(Name, Msg),
+      ok
+   catch _:_ -> ok
    end;
 epmRequest(EpmSrv, Cmd) ->
    EpmSrv ! Cmd,
@@ -849,8 +854,7 @@ epmRpc(EpmSrv, Cmd) ->
    try gen:call(EpmSrv, '$epm_call', Cmd, infinity) of
       {ok, Reply} ->
          Reply
-   catch
-      Class:Reason:Stacktrace ->
+   catch Class:Reason:Stacktrace ->
          erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, infinity]}}, Stacktrace)
    end.
 
@@ -858,8 +862,7 @@ epmRpc(EpmSrv, Cmd, Timeout) ->
    try gen:call(EpmSrv, '$epm_call', Cmd, Timeout) of
       {ok, Reply} ->
          Reply
-   catch
-      Class:Reason:Stacktrace ->
+   catch Class:Reason:Stacktrace ->
          erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, Timeout]}}, Stacktrace)
    end.
 
@@ -2322,9 +2325,9 @@ mod(_) -> "t".
 format_status(Opt, PDict, _CycleData, Module, CurStatus, CurState) ->
    case erlang:function_exported(Module, formatStatus, 2) of
       true ->
-         try Module:format_status(Opt, [PDict, CurStatus, CurState])
+         try Module:formatStatus(Opt, [PDict, CurStatus, CurState])
          catch
-            Result -> Result;
+            throw:Result -> Result;
             _:_ ->
                format_status_default(Opt, {{CurStatus, CurState}, atom_to_list(Module) ++ ":formatStatus/2 crashed"})
          end;
