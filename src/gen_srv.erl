@@ -112,8 +112,8 @@
    {reply, Reply :: term(), NewState :: term(), Actions :: actions()} |
    {noreply, NewState :: term()} |
    {noreply, NewState :: term(), Actions :: actions()} |
-   {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
-   {stop, Reason :: term(), NewState :: term()}.
+   {stop, Reason :: term(), NewState :: term()} |
+   {stopReply, Reason :: term(), Reply :: term(), NewState :: term()}.
 
 -callback handleCast(Request :: term(), State :: term()) ->
    ok |
@@ -757,10 +757,13 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, R
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, listify(Actions));
-      {stop, Reason, Reply, NewState} ->
-         reply(From, Reply),
+      {stopReply, Reason, Reply, NewState} ->
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
-         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, NewDebug, Timers, {return, stop_reply})
+         try
+            terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, NewDebug, Timers, {return, stop_reply})
+         after
+            _ = reply(From, Reply)
+         end
    end.
 
 handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, LeftAction, Result) ->

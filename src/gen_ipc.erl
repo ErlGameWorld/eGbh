@@ -148,20 +148,22 @@
 -type timeoutNewAction() ::
    {'eTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the event_timeout option
    {'eTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |                          % Set the event_timeout option
-   {{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term()} |                                        % Set the generic_timeout option
-   {{'gTimeout', Name :: term()}, Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |        % Set the generic_timeout option
    {'sTimeout', Time :: timeouts(), EventContent :: term()} |                                                          % Set the status_timeout option
-   {'sTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])}.                           % Set the status_timeout option
+   {'sTimeout', Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])} |                          % Set the status_timeout option
+   {'gTimeout', Name :: term(), Time :: timeouts(), EventContent :: term()} |                                          % Set the generic_timeout option
+   {'gTimeout', Name :: term(), Time :: timeouts(), EventContent :: term(), Options :: ([timeoutOption()])}.           % Set the generic_timeout option
+
+
 
 -type timeoutCancelAction() ::
    'c_eTimeout' |                                                                                                      % 不可能也不需要更新此超时，因为任何其他事件都会自动取消它。
-   {'c_gTimeout', Name :: term()} |
-   'c_sTimeout'.
+   'c_sTimeout' |
+   {'c_gTimeout', Name :: term()}.
 
 -type timeoutUpdateAction() ::
    {'u_eTimeout', EventContent :: term()} |                                                                            % 不可能也不需要取消此超时，因为任何其他事件都会自动取消它。
-   {{'u_gTimeout', Name :: term()}, EventContent :: term()} |
-   {'u_sTimeout', EventContent :: term()}.
+   {'u_sTimeout', EventContent :: term()} |
+   {'u_gTimeout', Name :: term(), EventContent :: term()}.
 
 -type actions(ActionType) ::
    ActionType |
@@ -175,15 +177,15 @@
    {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term()} |                                             % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
    {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
    {'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |                            % 用作gen_server模式时快速响应进入消息接收
-   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: actions(eventAction())} |            % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
+   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: actions(eventAction())} |          % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
    {'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                                           % 用作gen_server模式时快速响应进入循环
-   {'nextS', NextStatus :: term(), NewState :: term()} |                                                                    % {next_status,NextS,NewData,[]}
-   {'nextS', NextStatus :: term(), NewState :: term(), Actions :: actions(eventAction())} |                                   % Status transition, maybe to the same status
+   {'nextS', NextStatus :: term(), NewState :: term()} |                                                               % {next_status,NextS,NewData,[]}
+   {'nextS', NextStatus :: term(), NewState :: term(), Actions :: actions(eventAction())} |                            % Status transition, maybe to the same status
    commonCallbackResult(eventAction()).
 
 -type afterCallbackResult() ::
-   {'nextS', NextStatus :: term(), NewState :: term()} |                                                                    % {next_status,NextS,NewData,[]}
-   {'nextS', NextStatus :: term(), NewState :: term(), Actions :: actions(afterAction())} |                                   % Status transition, maybe to the same status
+   {'nextS', NextStatus :: term(), NewState :: term()} |                                                               % {next_status,NextS,NewData,[]}
+   {'nextS', NextStatus :: term(), NewState :: term(), Actions :: actions(afterAction())} |                            % Status transition, maybe to the same status
    {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
    {'noreply', NewState :: term(), Options :: hibernate} |                                                             % 用作gen_server模式时快速响应进入消息接收
    commonCallbackResult(afterAction()).
@@ -203,8 +205,8 @@
    'stop' |                                                                                                            % {stop,normal}
    {'stop', Reason :: term()} |                                                                                        % Stop the server
    {'stop', Reason :: term(), NewState :: term()} |                                                                    % Stop the server
-   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...]} |                                  % Reply then stop the server
-   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...], NewState :: term()}.               % Reply then stop the server
+   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...] | term()} |                                  % Reply then stop the server
+   {'stopReply', Reason :: term(), Replies :: replyAction() | [replyAction(), ...] | term(), NewState :: term()}.               % Reply then stop the server
 
 %% 状态机的初始化功能函数
 %% 如果要模拟gen_server init返回定时时间 可以在Actions返回定时动作
@@ -1457,9 +1459,31 @@ handleEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEve
       {stop, Reason, NewState} ->
          terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, LeftEvents);
       {stopReply, Reason, Replies} ->
-         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Replies);
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Replies}),
+         try
+            terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, NewDebug, LeftEvents)
+         after
+            case Replies of
+               {reply, RFrom, Reply} ->
+                  reply(RFrom, Reply);
+               _ ->
+                  [reply(RFrom, Reply) || {reply, RFrom, Reply} <- Replies],
+                  ok
+            end
+         end;
       {stopReply, Reason, Replies, NewState} ->
-         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, LeftEvents, Replies);
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Replies}),
+         try
+            terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, NewDebug, LeftEvents)
+         after
+            case Replies of
+               {reply, RFrom, Reply} ->
+                  reply(RFrom, Reply);
+               _ ->
+                  [reply(RFrom, Reply) || {reply, RFrom, Reply} <- Replies],
+                  ok
+            end
+         end;
       _ ->
          terminate(error, {bad_handleEnterCR, Result}, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
    end.
@@ -1527,9 +1551,35 @@ handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result,
       {stop, Reason, NewState} ->
          terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, LeftEvents);
       {stopReply, Reason, Replies} ->
-         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Replies);
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Replies}),
+         try
+            terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, NewDebug, LeftEvents)
+         after
+            case Replies of
+               {reply, RFrom, Reply} ->
+                  reply(RFrom, Reply);
+               _ when is_list(Replies) ->
+                  [reply(RFrom, Reply) || {reply, RFrom, Reply} <- Replies],
+                  ok;
+               _ ->
+                  _ = reply(From, Replies)
+            end
+         end;
       {stopReply, Reason, Replies, NewState} ->
-         replyThenTerminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, Debug, LeftEvents, Replies);
+         NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Replies}),
+         try
+            terminate(exit, Reason, ?STACKTRACE(), CycleData, Module, CurStatus, NewState, NewDebug, LeftEvents)
+         after
+            case Replies of
+               {reply, RFrom, Reply} ->
+                  _ = reply(RFrom, Reply);
+               _ when is_list(Replies) ->
+                  [reply(RFrom, Reply) || {reply, RFrom, Reply} <- Replies],
+                  ok;
+               _ ->
+                  _ = reply(From, Replies)
+            end
+         end;
       _ ->
          terminate(error, {bad_handleEventCR, Result}, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents)
    end.
@@ -1929,19 +1979,6 @@ performEvents(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, IsHib, 
                end,
                startEventCall(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Event)
          end
-   end.
-
-replyThenTerminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Replies) ->
-   NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Replies}),
-   try
-      terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, NewDebug, LeftEvents)
-   after
-      case Replies of
-         {reply, From, Reply} ->
-            reply(From, Reply);
-         _ ->
-            [reply(From, Reply) || {reply, From, Reply} <- Replies]
-      end
    end.
 
 terminate(Class, Reason, Stacktrace, CycleData, Module, CurStatus, CurState, Debug, LeftEvents) ->
