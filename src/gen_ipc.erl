@@ -1665,19 +1665,19 @@ doParseAL([OneAction | LeftActions], CallbackForm, CycleData, Debug, IsPos, IsHi
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
       {sTimeout, _Time, _TimeoutMsg} ->
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
-      {{gTimeout, _Name}, _Time, _TimeoutMsg} ->
+      {gTimeout, _Name, _Time, _TimeoutMsg} ->
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
       {eTimeout, _Time, _TimeoutMsg, _Options} ->
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
       {sTimeout, _Time, _TimeoutMsg, _Options} ->
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
-      {{gTimeout, _Name}, _Time, _TimeoutMsg, _Options} ->
+      {gTimeout, _Name, _Time, _TimeoutMsg, _Options} ->
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
       {u_eTimeout, _TimeoutMsg} ->
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
       {u_sTimeout, _TimeoutMsg} ->
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
-      {{u_gTimeout, _Name}, _TimeoutMsg} ->
+      {u_gTimeout, _Name, _TimeoutMsg} ->
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
       c_eTimeout ->
          doParseAL(LeftActions, CallbackForm, CycleData, Debug, IsPos, IsHib, DoAfter, [OneAction | Timeouts], NextEs);
