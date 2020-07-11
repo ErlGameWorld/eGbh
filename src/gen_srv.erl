@@ -105,7 +105,7 @@
 -callback handleCall(Request :: term(), State :: term(), From :: {pid(), Tag :: term()}) ->
    ok |
    {reply, Reply :: term(), NewState :: term()} |
-   {reply, Reply :: term(), NewState :: term(), action() | action()} |
+   {reply, Reply :: term(), NewState :: term(), Actions :: action() | action()} |
    {noreply, NewState :: term()} |
    {noreply, NewState :: term(), action() | action()} |
    {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
@@ -206,9 +206,9 @@ init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
       {ok, State} ->
          proc_lib:init_ack(Starter, {ok, self()}),
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, false);
-      {ok, State, Action} ->
+      {ok, State, Actions} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Action));
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Actions));
       {stop, Reason} ->
          % 为了保持一致性，我们必须确保在
          % %%父进程收到有关失败的通知之前，必须先注销%%注册名称（如果有）。
@@ -252,12 +252,12 @@ enter_loop(Module, State, Opts, ServerName) ->
 
 
 -spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), action() | [action()]) -> no_return().
-enter_loop(Module, State, Opts, ServerName, Action) ->
+enter_loop(Module, State, Opts, ServerName, Actions) ->
    Name = gen:get_proc_name(ServerName),
    Parent = gen:get_parent(),
    Debug = gen:debug_options(Name, Opts),
    HibernateAfterTimeout = gen:hibernate_after(Opts),
-   loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Action)).
+   loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Actions)).
 
 %%% Internal callbacks
 wakeupFromHib(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib) ->
@@ -746,14 +746,14 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, R
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, false);
-      {noreply, NewState, Action} ->
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, listify(Action));
+      {noreply, NewState, Actions} ->
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, listify(Actions));
       {stop, Reason, NewState} ->
          terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop});
-      {reply, Reply, NewState, Action} ->
+      {reply, Reply, NewState, Actions} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, listify(Action));
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, listify(Actions));
       {stop, Reason, Reply, NewState} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
@@ -766,8 +766,8 @@ handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, L
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, LeftAction);
       {noreply, NewState} ->
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, LeftAction);
-      {noreply, NewState, Action} ->
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, listify(Action) ++ LeftAction);
+      {noreply, NewState, Actions} ->
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, listify(Actions) ++ LeftAction);
       {stop, Reason, NewState} ->
          terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop_reply})
    end.
