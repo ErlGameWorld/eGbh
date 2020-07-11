@@ -84,6 +84,10 @@
    {'uTimeout', Name :: term(), TimeoutMsg :: term()} |
    {'cTimeout', Name :: term()}.
 
+-type actions() ::
+   action() |
+   [action(), ...].
+
 -type timeouts() :: Time :: timeout() | integer().
 -type timeoutOption() :: {abs, Abs :: boolean()}.
 %% -type timer() :: #{TimeoutName :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
@@ -97,7 +101,7 @@
 
 -callback init(Args :: term()) ->
    {ok, State :: term()} |
-   {ok, State :: term(), action()} |
+   {ok, State :: term(), Actions :: actions()} |
    {stop, Reason :: term()} |
    ignore.
 
@@ -105,28 +109,28 @@
 -callback handleCall(Request :: term(), State :: term(), From :: {pid(), Tag :: term()}) ->
    ok |
    {reply, Reply :: term(), NewState :: term()} |
-   {reply, Reply :: term(), NewState :: term(), Actions :: action() | action()} |
+   {reply, Reply :: term(), NewState :: term(), Actions :: actions()} |
    {noreply, NewState :: term()} |
-   {noreply, NewState :: term(), action() | action()} |
+   {noreply, NewState :: term(), Actions :: actions()} |
    {stop, Reason :: term(), Reply :: term(), NewState :: term()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleCast(Request :: term(), State :: term()) ->
    ok |
    {noreply, NewState :: term()} |
-   {noreply, NewState :: term(), action() | action()} |
+   {noreply, NewState :: term(), Actions :: actions()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleInfo(Info :: timeout | term(), State :: term()) ->
    ok |
    {noreply, NewState :: term()} |
-   {noreply, NewState :: term(), action() | action()} |
+   {noreply, NewState :: term(), Actions :: actions()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleAfter(Info :: term(), State :: term()) ->
    ok |
    {noreply, NewState :: term()} |
-   {noreply, NewState :: term(), action() | action()} |
+   {noreply, NewState :: term(), Actions :: actions()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback terminate(Reason :: (normal | shutdown | {shutdown, term()} |term()), State :: term()) ->
@@ -250,8 +254,7 @@ enter_loop(Module, State, Opts) ->
 enter_loop(Module, State, Opts, ServerName) ->
    enter_loop(Module, State, Opts, ServerName, infinity).
 
-
--spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), action() | [action()]) -> no_return().
+-spec enter_loop(Module :: module(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), Actions :: actions()) -> no_return().
 enter_loop(Module, State, Opts, ServerName, Actions) ->
    Name = gen:get_proc_name(ServerName),
    Parent = gen:get_parent(),
