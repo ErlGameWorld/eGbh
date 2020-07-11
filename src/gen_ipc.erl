@@ -163,6 +163,10 @@
    {{'u_gTimeout', Name :: term()}, EventContent :: term()} |
    {'u_sTimeout', EventContent :: term()}.
 
+-type actions(ActionType) ::
+   ActionType |
+   [ActionType, ...].
+
 -type replyAction() ::
    {'reply', From :: from(), Reply :: term()}.
 
@@ -171,15 +175,15 @@
    {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term()} |                                             % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
    {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
    {'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |                            % 用作gen_server模式时快速响应进入消息接收
-   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |            % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
+   {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: actions(eventAction())} |            % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
    {'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                                           % 用作gen_server模式时快速响应进入循环
    {'nextS', NextStatus :: term(), NewState :: term()} |                                                                    % {next_status,NextS,NewData,[]}
-   {'nextS', NextStatus :: term(), NewState :: term(), Actions :: [eventAction(), ...]} |                                   % Status transition, maybe to the same status
+   {'nextS', NextStatus :: term(), NewState :: term(), Actions :: actions(eventAction())} |                                   % Status transition, maybe to the same status
    commonCallbackResult(eventAction()).
 
 -type afterCallbackResult() ::
    {'nextS', NextStatus :: term(), NewState :: term()} |                                                                    % {next_status,NextS,NewData,[]}
-   {'nextS', NextStatus :: term(), NewState :: term(), Actions :: [afterAction(), ...]} |                                   % Status transition, maybe to the same status
+   {'nextS', NextStatus :: term(), NewState :: term(), Actions :: actions(afterAction())} |                                   % Status transition, maybe to the same status
    {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
    {'noreply', NewState :: term(), Options :: hibernate} |                                                             % 用作gen_server模式时快速响应进入消息接收
    commonCallbackResult(afterAction()).
@@ -189,13 +193,13 @@
 
 -type commonCallbackResult(ActionType) ::
    {'kpS', NewState :: term()} |                                                                                       % {keep_status,NewData,[]}
-   {'kpS', NewState :: term(), Actions :: [ActionType]} |                                                              % Keep status, change data
+   {'kpS', NewState :: term(), Actions :: actions(ActionType)} |                                                              % Keep status, change data
    'kpS_S' |                                                                                                           % {keep_status_and_data,[]}
    {'kpS_S', Actions :: [ActionType]} |                                                                                % Keep status and data -> only actions
    {'reS', NewState :: term()} |                                                                                       % {repeat_status,NewData,[]}
-   {'reS', NewState :: term(), Actions :: [ActionType]} |                                                              % Repeat status, change data
+   {'reS', NewState :: term(), Actions :: actions(ActionType)} |                                                              % Repeat status, change data
    'reS_S' |                                                                                                           % {repeat_status_and_data,[]}
-   {'reS_S', Actions :: [ActionType]} |                                                                                % Repeat status and data -> only actions
+   {'reS_S', Actions :: actions(ActionType)} |                                                                                % Repeat status and data -> only actions
    'stop' |                                                                                                            % {stop,normal}
    {'stop', Reason :: term()} |                                                                                        % Stop the server
    {'stop', Reason :: term(), NewState :: term()} |                                                                    % Stop the server
@@ -210,7 +214,7 @@
    {'stop', Reason :: term()} |
    {'ok', State :: term()} |
    {'ok', Status :: term(), State :: term()} |
-   {'ok', Status :: term(), State :: term(), Actions :: [initAction(), ...]}.
+   {'ok', Status :: term(), State :: term(), Actions :: actions(initAction())}.
 
 %% 当 enter call 回调函数
 -callback handleEnter(OldStatus :: term(), CurStatus :: term(), State :: term()) ->
@@ -428,7 +432,7 @@ init_it(Starter, Parent, ServerRef, Module, Args, Opts) ->
 enter_loop(Module, Status, State, Opts) ->
    enter_loop(Module, Status, State, Opts, self(), []).
 
--spec enter_loop(Module :: module(), Status :: term(), State :: term(), Opts :: [enterLoopOpt()], ServerOrActions :: serverName() | pid() | [eventAction()]) -> no_return().
+-spec enter_loop(Module :: module(), Status :: term(), State :: term(), Opts :: [enterLoopOpt()], ServerOrActions :: serverName() | pid() | actions(eventAction())) -> no_return().
 enter_loop(Module, Status, State, Opts, ServerOrActions) ->
    if
       is_list(ServerOrActions) ->
@@ -437,7 +441,7 @@ enter_loop(Module, Status, State, Opts, ServerOrActions) ->
          enter_loop(Module, Status, State, Opts, ServerOrActions, [])
    end.
 
--spec enter_loop(Module :: module(), Status :: term(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), Actions :: [eventAction()]) -> no_return().
+-spec enter_loop(Module :: module(), Status :: term(), State :: term(), Opts :: [enterLoopOpt()], Server :: serverName() | pid(), Actions :: actions(eventAction())) -> no_return().
 enter_loop(Module, Status, State, Opts, ServerName, Actions) ->
    is_atom(Module) orelse error({atom, Module}),
    Parent = gen:get_parent(),
