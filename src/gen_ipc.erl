@@ -404,7 +404,7 @@ init_it(Starter, Parent, ServerRef, Module, Args, Opts) ->
          loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, Status, State, []);
       {ok, Status, State, Actions} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, Status, State, Actions);
+         loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, Status, State, listify(Actions));
       {stop, Reason} ->
          gen:unregister_name(ServerRef),
          proc_lib:init_ack(Starter, {error, Reason}),
@@ -1130,6 +1130,11 @@ updateParent(Parent, #cycleData{parent = OldParent} = CycleData) ->
       _ ->
          setelement(#cycleData.parent, CycleData, Parent)
    end.
+
+listify(Item) when is_list(Item) ->
+   Item;
+listify(Item) ->
+   [Item].
 %%%==========================================================================
 %%% Internal callbacks
 wakeupFromHib(CycleData, Module, CurStatus, CurState, Debug, IsHib) ->
@@ -1432,19 +1437,19 @@ handleEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEve
       {kpS, NewState} ->
          dealEnterCR(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, false);
       {kpS, NewState, Actions} ->
-         parseEnterAL(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, false, Actions);
+         parseEnterAL(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, false, listify(Actions));
       kpS_S ->
          dealEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, false);
       {kpS_S, Actions} ->
-         parseEnterAL(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, false, Actions);
+         parseEnterAL(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, false, listify(Actions));
       {reS, NewState} ->
          dealEnterCR(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, true);
       {reS, NewState, Actions} ->
-         parseEnterAL(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, true, Actions);
+         parseEnterAL(CycleData, Module, PrevStatus, NewState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, true, listify(Actions));
       reS_S ->
          dealEnterCR(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, true);
       {reS_S, Actions} ->
-         parseEnterAL(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, true, Actions);
+         parseEnterAL(CycleData, Module, PrevStatus, CurState, CurStatus, Debug, LeftEvents, Timeouts, NextEs, IsPos, IsHib, DoAfter, true, listify(Actions));
       stop ->
          terminate(exit, normal, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents);
       {stop, Reason} ->
@@ -1494,27 +1499,27 @@ handleEventCR(CycleData, Module, CurStatus, CurState, Debug, LeftEvents, Result,
       {sreply, Reply, NewStatus, NewState, Actions} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, CycleData, {out, Reply, From}),
-         parseEventAL(CycleData, Module, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus, Actions, CallbackForm);
+         parseEventAL(CycleData, Module, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus, listify(Actions), CallbackForm);
       {nextS, NewStatus, NewState} ->
          dealEventCR(CycleData, Module, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus);
       {nextS, NewStatus, NewState, Actions} ->
-         parseEventAL(CycleData, Module, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus, Actions, CallbackForm);
+         parseEventAL(CycleData, Module, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus, listify(Actions), CallbackForm);
       {kpS, NewState} ->
          dealEventCR(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, false);
       {kpS, NewState, Actions} ->
-         parseEventAL(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, false, Actions, CallbackForm);
+         parseEventAL(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, false, listify(Actions), CallbackForm);
       kpS_S ->
          dealEventCR(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, false);
       {kpS_S, Actions} ->
-         parseEventAL(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, false, Actions, CallbackForm);
+         parseEventAL(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, false, listify(Actions), CallbackForm);
       {reS, NewState} ->
          dealEventCR(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, true);
       {reS, NewState, Actions} ->
-         parseEventAL(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, true, Actions, CallbackForm);
+         parseEventAL(CycleData, Module, CurStatus, NewState, CurStatus, Debug, LeftEvents, true, listify(Actions), CallbackForm);
       reS_S ->
          dealEventCR(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, true);
       {reS_S, Actions} ->
-         parseEventAL(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, true, Actions, CallbackForm);
+         parseEventAL(CycleData, Module, CurStatus, CurState, CurStatus, Debug, LeftEvents, true, listify(Actions), CallbackForm);
       stop ->
          terminate(exit, normal, ?STACKTRACE(), CycleData, Module, CurStatus, CurState, Debug, LeftEvents);
       {stop, Reason} ->
