@@ -117,8 +117,8 @@
 %% 如果有postponed 事件则 事件执行顺序为 超时添加和更新 + 零超时 + 当前事件 + 反序的Postpone事件 + LeftEvent
 %% 处理待处理的事件，或者如果没有待处理的事件，则服务器进入接收或休眠状态（当“hibernate”为“ true”时）
 -type initAction() ::
-{trap_exit, Bool :: isTrapExit()} |                                        % 设置是否捕捉信息 主要用于gen_event模式下
-eventAction().
+   {trap_exit, Bool :: isTrapExit()} |                                        % 设置是否捕捉信息 主要用于gen_event模式下
+   eventAction().
 
 -type eventAction() ::
    {'doAfter', Args :: term()} |                                           % 设置执行某事件后是否回调 handleAfter
@@ -164,7 +164,7 @@ eventAction().
    {'u_sTimeout', EventContent :: term()}.
 
 -type replyAction() ::
-{'reply', From :: from(), Reply :: term()}.
+   {'reply', From :: from(), Reply :: term()}.
 
 -type eventCallbackResult() ::
    {'reply', Reply :: term(), NewState :: term()} |                                                                    % 用作gen_server模式时快速响应进入消息接收
@@ -185,7 +185,7 @@ eventAction().
    commonCallbackResult(afterAction()).
 
 -type enterCallbackResult() ::
-commonCallbackResult(enterAction()).
+   commonCallbackResult(enterAction()).
 
 -type commonCallbackResult(ActionType) ::
    {'kpS', NewState :: term()} |                                                                                       % {keep_status,NewData,[]}
