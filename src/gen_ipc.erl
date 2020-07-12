@@ -459,13 +459,13 @@ loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, CurStatus, CurStat
    NewDebug = ?SYS_DEBUG(Debug, Name, {enter, CurStatus}),
    %% 强制执行{postpone，false}以确保我们的假事件被丢弃
    LastActions = MewActions ++ [{isPos, false}],
-   parseEventAL(Parent, Name, Module, HibernateAfterTimeout, false,  #{}, [], #{}, CurStatus, CurState, CurStatus, NewDebug, [{onevent, init_status}], true, LastActions, ?CB_FORM_EVENT).
+   parseEventAL(Parent, Name, Module, HibernateAfterTimeout, false, #{}, [], #{}, CurStatus, CurState, CurStatus, NewDebug, [{onevent, init_status}], true, LastActions, ?CB_FORM_EVENT).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-system_continue(Parent, Debug, {Parent, Name, Module, HibernateAfterTimeout, IsEnter,  EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}) ->
+system_continue(Parent, Debug, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}) ->
    if
       IsHib ->
-         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, IsEnter,  EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib]);
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib]);
       true ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib)
    end.
@@ -1597,7 +1597,7 @@ parseEnterAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Post
             {error, ErrorContent} ->
                terminate(error, ErrorContent, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, Debug, LeftEvents);
             {NewIsEnter, NNewTimers, NewDebug, NewIsPos, NewIsHib, DoAfter, NewNextEs} ->
-               case NewIsEnter andalso IsCallEnter  of
+               case NewIsEnter andalso IsCallEnter of
                   true ->
                      startEnterCall(Parent, Name, Module, HibernateAfterTimeout, NewIsEnter, EpmHers, Postponed, NNewTimers, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewNextEs, NewIsPos, NewIsHib, DoAfter);
                   _ ->
