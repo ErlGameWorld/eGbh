@@ -1045,7 +1045,7 @@ report_error(#epmHer{epmId = EpmId, epmM = EpmM}, Reason, State, LastIn) ->
          handler => {EpmId, EpmM},
          name => undefined,
          last_message => LastIn,
-         state=> format_status(terminate, [EpmM, get(), State]),
+         state=> State,
          reason => Reason
       },
       #{
@@ -1757,20 +1757,40 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
 %% 进行状态转换
 performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, [CurEvent | LeftEvents], NextEs, IsPos, IsHib, DoAfter) ->
    %% 已收集所有选项，并缓冲next_events。执行实际状态转换。如果推迟则将当前事件移至推迟
-   %% 此时 Timeouts, NextEs的顺序与最开始出现的顺序相反. 后面执行的顺序 超时添加和更新 + 零超时 + 当前事件 + 反序的Postpone事件 + LeftEvent
-   NewDebug = ?SYS_DEBUG(Debug, Name, case IsPos of true -> {postpone, CurEvent, CurStatus, NewStatus}; _ ->
-      {consume, CurEvent, NewStatus, NewStatus} end),
+   %% 此时 NextEs的顺序与最开始出现的顺序相反. 后面执行的顺序 当前新增事件 + 反序的Postpone事件 + LeftEvents
+   NewDebug = ?SYS_DEBUG(Debug, Name, case IsPos of true -> {postpone, CurEvent, CurStatus, NewStatus}; _ -> {consume, CurEvent, CurStatus, NewStatus} end),
    if
       CurStatus =:= NewStatus ->
          %% Cancel event timeout
          if
             IsPos ->
-               performTimeouts(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, [CurEvent | Postponed], Timers, NewStatus, CurState, NewDebug, LeftEvents, NextEs, IsHib, DoAfter);
+               LastLeftEvents =
+                  case NextEs of
+                     [] ->
+                        LeftEvents;
+                     [Es1] ->
+                        [Es1 | LeftEvents];
+                     [Es2, Es1] ->
+                        [Es1, Es2 | LeftEvents];
+                     _ ->
+                        lists:reverse(NextEs, LeftEvents)
+                  end,
+               performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, [CurEvent | Postponed], Timers, NewStatus, CurState, NewDebug, LastLeftEvents, IsHib, DoAfter);
             true ->
-               performTimeouts(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, NewStatus, CurState, NewDebug, LeftEvents, NextEs, IsHib, DoAfter)
+               LastLeftEvents =
+                  case NextEs of
+                     [] ->
+                        LeftEvents;
+                     [Es1] ->
+                        [Es1 | LeftEvents];
+                     [Es2, Es1] ->
+                        [Es1, Es2 | LeftEvents];
+                     _ ->
+                        lists:reverse(NextEs, LeftEvents)
+                  end,
+               performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, NewStatus, CurState, NewDebug, LastLeftEvents, IsHib, DoAfter)
          end;
       true ->
-         %% 取消 status and event timeout
          %% 状态发生改变 重试推迟的事件
          if
             IsPos ->
@@ -1785,7 +1805,18 @@ performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers
                      _ ->
                         lists:reverse(Postponed, [CurEvent | LeftEvents])
                   end,
-               performTimeouts(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, [], Timers, NewStatus, CurState, NewDebug, NewLeftEvents, NextEs, IsHib, DoAfter);
+               LastLeftEvents =
+                  case NextEs of
+                     [] ->
+                        NewLeftEvents;
+                     [Es1] ->
+                        [Es1 | NewLeftEvents];
+                     [Es2, Es1] ->
+                        [Es1, Es2 | NewLeftEvents];
+                     _ ->
+                        lists:reverse(NextEs, NewLeftEvents)
+                  end,
+               performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, [], Timers, NewStatus, CurState, NewDebug, LastLeftEvents, IsHib, DoAfter);
             true ->
                NewLeftEvents =
                   case Postponed of
@@ -1798,25 +1829,20 @@ performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers
                      _ ->
                         lists:reverse(Postponed, LeftEvents)
                   end,
-               performTimeouts(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, [], Timers, NewStatus, CurState, NewDebug, NewLeftEvents, NextEs, IsHib, DoAfter)
+               LastLeftEvents =
+                  case NextEs of
+                     [] ->
+                        NewLeftEvents;
+                     [Es1] ->
+                        [Es1 | NewLeftEvents];
+                     [Es2, Es1] ->
+                        [Es1, Es2 | NewLeftEvents];
+                     _ ->
+                        lists:reverse(NextEs, NewLeftEvents)
+                  end,
+               performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, [], Timers, NewStatus, CurState, NewDebug, LastLeftEvents, IsHib, DoAfter)
          end
    end.
-
-%% 通过超时和插入事件的处理继续状态转换
-performTimeouts(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, NextEs, IsHib, DoAfter) ->
-   TemLastEvents =
-      case NextEs of
-         [] ->
-            LeftEvents;
-         [E1] ->
-            [E1 | LeftEvents];
-         [E2, E1] ->
-            [E1, E2 | LeftEvents];
-         _ ->
-            lists:reverse(NextEs, LeftEvents)
-      end,
-   performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, TemLastEvents, IsHib, DoAfter).
-
 
 %% 状态转换已完成，如果有排队事件，则继续循环，否则获取新事件
 performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, IsHib, DoAfter) ->

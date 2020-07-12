@@ -290,7 +290,7 @@ loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, 
 %%-----------------------------------------------------------------
 %% Callback functions for system messages handling.
 %%-----------------------------------------------------------------
-system_continue(Parent, Debug, [Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib]) ->
+system_continue(Parent, Debug, {Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib}) ->
    case IsHib of
       true ->
          proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, IsHib]);
@@ -299,10 +299,10 @@ system_continue(Parent, Debug, [Name, Module, HibernateAfterTimeout, Timers, Cur
    end.
 
 -spec system_terminate(_, _, _, [_]) -> no_return().
-system_terminate(Reason, _Parent, Debug, [Name, Module, _HibernateAfterTimeout, Timers, CurState, _IsHib]) ->
+system_terminate(Reason, _Parent, Debug, {Name, Module, _HibernateAfterTimeout, Timers, CurState, _IsHib}) ->
    terminate(exit, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, CurState, []).
 
-system_code_change([Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib], _Module, OldVsn, Extra) ->
+system_code_change({Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib}, _Module, OldVsn, Extra) ->
    case
       try Module:code_change(OldVsn, CurState, Extra)
       catch
@@ -310,16 +310,16 @@ system_code_change([Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib
          _C:_R -> {_R, _R}
       end
    of
-      {ok, NewState} -> {ok, [Name, Module, HibernateAfterTimeout, Timers, NewState, IsHib]};
+      {ok, NewState} -> {ok, {Name, Module, HibernateAfterTimeout, Timers, NewState, IsHib}};
       Error -> Error
    end.
 
-system_get_state([_Name, _Module, _HibernateAfterTimeout, _Timers, CurState, _IsHib]) ->
+system_get_state({_Name, _Module, _HibernateAfterTimeout, _Timers, CurState, _IsHib}) ->
    {ok, CurState}.
 
-system_replace_state(StateFun, [Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib]) ->
+system_replace_state(StateFun, {Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib}) ->
    NewState = StateFun(CurState),
-   {ok, NewState, [Name, Module, HibernateAfterTimeout, Timers, NewState, IsHib]}.
+   {ok, NewState, {Name, Module, HibernateAfterTimeout, Timers, NewState, IsHib}}.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  start  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -676,7 +676,7 @@ receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState,
                end;
             {system, PidFrom, Request} ->
                %% 不返回但尾递归调用 system_continue/3
-               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, [Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib], IsHib);
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib}, IsHib);
 
             {'EXIT', Parent, Reason} ->
                terminate(Reason, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, CurState, Msg);
@@ -1221,11 +1221,11 @@ mod(_) -> "t".
 %% Status information
 %%-----------------------------------------------------------------
 format_status(Opt, StatusData) ->
-   [PDict, SysState, Parent, Debug, [Name, State, Module, _Time, _HibernateAfterTimeout]] = StatusData,
+   [PDict, SysState, Parent, Debug, {Name, Module, _HibernateAfterTimeout, _Timers, CurState, _IsHib}] = StatusData,
    Header = gen:format_status_header("Status for generic server", Name),
    Log = sys:get_log(Debug),
    Specific =
-      case format_status(Opt, Module, PDict, State) of
+      case format_status(Opt, Module, PDict, CurState) of
          S when is_list(S) -> S;
          S -> [S]
       end,
