@@ -108,6 +108,7 @@
 
 -callback handleCall(Request :: term(), State :: term(), From :: {pid(), Tag :: term()}) ->
    ok |
+   {reply, Reply :: term()} |
    {reply, Reply :: term(), NewState :: term()} |
    {reply, Reply :: term(), NewState :: term(), Actions :: actions()} |
    {noreply, NewState :: term()} |
@@ -743,6 +744,10 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, R
    case Result of
       ok ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false);
+      {reply, Reply} ->
+         reply(From, Reply),
+         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, CurState}),
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, false);
       {noreply, NewState} ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, false);
       {reply, Reply, NewState} ->
