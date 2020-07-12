@@ -12,7 +12,7 @@
    , stop/1, stop/3
    , call/2, call/3
    , send_request/2, wait_response/2, check_response/2
-   , cast/2, reply/1, reply/2
+   , cast/2, send/2, reply/1, reply/2
    , abcast/2, abcast/3
    , multi_call/2, multi_call/3, multi_call/4
    , enter_loop/3, enter_loop/4, enter_loop/5
@@ -465,6 +465,29 @@ cast(Dest, Msg) ->
    ok
    catch _:_ -> ok
    end.
+
+-spec send(ServerRef :: serverRef(), Msg :: term()) -> ok.
+send({global, Name}, Msg) ->
+   try global:send(Name, Msg),
+   ok
+   catch _:_ -> ok
+   end;
+send({via, RegMod, Name}, Msg) ->
+   try RegMod:send(Name, Msg),
+   ok
+   catch _:_ -> ok
+   end;
+send({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
+   try erlang:send(Dest, Msg),
+   ok
+   catch _:_ -> ok
+   end;
+send(Dest, Msg) ->
+   try erlang:send(Dest, Msg),
+   ok
+   catch _:_ -> ok
+   end.
+
 
 %% 异步广播，不返回任何内容，只是发送“ n”祈祷
 abcast(Name, Msg) when is_atom(Name) ->

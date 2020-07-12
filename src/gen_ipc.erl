@@ -10,7 +10,7 @@
    start/3, start/4, start_link/3, start_link/4
    , start_monitor/3, start_monitor/4
    , stop/1, stop/3
-   , cast/2
+   , cast/2, send/2
    , abcast/2, abcast/3
    , call/2, call/3
    , send_request/2, wait_response/1, wait_response/2, check_response/2
@@ -636,6 +636,28 @@ cast({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
    end;
 cast(Dest, Msg) ->
    try erlang:send(Dest, {'$gen_cast', Msg}),
+   ok
+   catch _:_ -> ok
+   end.
+
+-spec send(ServerRef :: serverRef(), Msg :: term()) -> ok.
+send({global, Name}, Msg) ->
+   try global:send(Name, Msg),
+   ok
+   catch _:_ -> ok
+   end;
+send({via, RegMod, Name}, Msg) ->
+   try RegMod:send(Name, Msg),
+   ok
+   catch _:_ -> ok
+   end;
+send({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
+   try erlang:send(Dest, Msg),
+   ok
+   catch _:_ -> ok
+   end;
+send(Dest, Msg) ->
+   try erlang:send(Dest, Msg),
    ok
    catch _:_ -> ok
    end.
