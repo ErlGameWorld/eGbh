@@ -209,10 +209,10 @@ init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
    case doModuleInit(Module, Args) of
       {ok, State} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, false);
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, #{}, State, false);
       {ok, State, Actions} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Actions));
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, #{}, State, listify(Actions));
       {stop, Reason} ->
          % 为了保持一致性，我们必须确保在
          % %%父进程收到有关失败的通知之前，必须先注销%%注册名称（如果有）。
@@ -260,27 +260,27 @@ enter_loop(Module, State, Opts, ServerName, Actions) ->
    Parent = gen:get_parent(),
    Debug = gen:debug_options(Name, Opts),
    HibernateAfterTimeout = gen:hibernate_after(Opts),
-   loopEntry(Parent, Name, Module, HibernateAfterTimeout, State, Debug, #{}, listify(Actions)).
+   loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, #{}, State, listify(Actions)).
 
 %%% Internal callbacks
-wakeupFromHib(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib) ->
+wakeupFromHib(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, IsHib) ->
    %% 这是一条新消息，唤醒了我们，因此我们必须立即收到它
-   receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib).
+   receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, IsHib).
 
-loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Actions) ->
+loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Actions) ->
    case doParseAL(Actions, Name, Debug, false, false, Timers) of
       {error, ErrorContent} ->
-         terminate(error, ErrorContent, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, []);
+         terminate(error, ErrorContent, ?STACKTRACE(), Name, Module,  Debug, Timers, CurState, []);
       {NewDebug, IsHib, DoAfter, NewTimers} ->
          case DoAfter of
             {doAfter, Args} ->
-               doAfterCall(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, listHib(IsHib), Args);
+               doAfterCall(Parent, Name, Module, HibernateAfterTimeout, NewDebug, NewTimers, CurState, listHib(IsHib), Args);
             _ ->
                case IsHib of
                   true ->
-                     proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, IsHib]);
+                     proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, NewDebug, NewTimers, CurState, IsHib]);
                   _ ->
-                     receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, NewTimers, false)
+                     receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, NewTimers, CurState, false)
                end
          end
    end.
@@ -290,19 +290,19 @@ loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, 
 %%-----------------------------------------------------------------
 %% Callback functions for system messages handling.
 %%-----------------------------------------------------------------
-system_continue(Parent, Debug, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib]) ->
+system_continue(Parent, Debug, [Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib]) ->
    case IsHib of
       true ->
-         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib]);
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, IsHib]);
       _ ->
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib)
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, IsHib)
    end.
 
 -spec system_terminate(_, _, _, [_]) -> no_return().
-system_terminate(Reason, _Parent, Debug, [Name, Module, _HibernateAfterTimeout, CurState, Timers, _IsHib]) ->
-   terminate(exit, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, []).
+system_terminate(Reason, _Parent, Debug, [Name, Module, _HibernateAfterTimeout, Timers, CurState, _IsHib]) ->
+   terminate(exit, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, CurState, []).
 
-system_code_change([Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib], _Module, OldVsn, Extra) ->
+system_code_change([Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib], _Module, OldVsn, Extra) ->
    case
       try Module:code_change(OldVsn, CurState, Extra)
       catch
@@ -310,16 +310,16 @@ system_code_change([Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib
          _C:_R -> {_R, _R}
       end
    of
-      {ok, NewState} -> {ok, [Name, Module, HibernateAfterTimeout, NewState, Timers, IsHib]};
+      {ok, NewState} -> {ok, [Name, Module, HibernateAfterTimeout, Timers, NewState, IsHib]};
       Error -> Error
    end.
 
-system_get_state([_Name, _Module, _HibernateAfterTimeout, CurState, _Timers, _IsHib]) ->
+system_get_state([_Name, _Module, _HibernateAfterTimeout, _Timers, CurState, _IsHib]) ->
    {ok, CurState}.
 
-system_replace_state(StateFun, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib]) ->
+system_replace_state(StateFun, [Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib]) ->
    NewState = StateFun(CurState),
-   {ok, NewState, [Name, Module, HibernateAfterTimeout, NewState, Timers, IsHib]}.
+   {ok, NewState, [Name, Module, HibernateAfterTimeout, Timers, NewState, IsHib]}.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks end %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  start  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -658,124 +658,124 @@ start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  end  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 
-receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, IsHib) ->
+receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, IsHib) ->
    receive
       Msg ->
          case Msg of
             {'$gen_call', From, Request} ->
-               matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, From, Request);
+               matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, Request);
             {'$gen_cast', Cast} ->
-               matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Cast);
+               matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Cast);
             {timeout, TimerRef, TimeoutName} ->
                case Timers of
                   #{TimeoutName := {TimerRef, TimeoutMsg}} ->
                      NewTimer = maps:remove(TimeoutName, Timers),
-                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, NewTimer, TimeoutMsg);
+                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, NewTimer, CurState, TimeoutMsg);
                   _ ->
-                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Msg)
+                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg)
                end;
             {system, PidFrom, Request} ->
                %% 不返回但尾递归调用 system_continue/3
-               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, [Name, Module, HibernateAfterTimeout, CurState, Timers, IsHib], IsHib);
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, [Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib], IsHib);
 
             {'EXIT', Parent, Reason} ->
-               terminate(Reason, Reason, ?STACKTRACE(), Name, Module, CurState, Debug, Timers, Msg);
+               terminate(Reason, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, CurState, Msg);
             _ ->
-               matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Msg)
+               matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout,  Debug, Timers, CurState, Msg)
          end
    after HibernateAfterTimeout ->
-      proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers])
+      proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState])
    end.
 
-matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, From, Request) ->
+matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, Request) ->
    MsgEvent = {{call, From}, Request},
    NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
    try Module:handleCall(Request, CurState, From) of
       Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, From)
+         handleCR(Parent, Name, Module, HibernateAfterTimeout,  NewDebug, Timers, CurState, Result, From)
    catch
       throw:Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, From);
+         handleCR(Parent, Name, Module, HibernateAfterTimeout,  NewDebug, Timers, CurState, Result, From);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
+         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, MsgEvent)
    end.
 
-matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Cast) ->
+matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Cast) ->
    MsgEvent = {cast, Cast},
    NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
    try Module:handleCast(Cast, CurState) of
       Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, false)
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false)
    catch
       throw:Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, false);
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
+         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, MsgEvent)
    end.
 
-matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Msg) ->
+matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg) ->
    MsgEvent = {info, Msg},
    NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
    try Module:handleInfo(Msg, CurState) of
       Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, false)
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false)
    catch
       throw:Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, Result, false);
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
+         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, MsgEvent)
    end.
 
-doAfterCall(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, LeftAction, Args) ->
+doAfterCall(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, LeftAction, Args) ->
    MsgEvent = {doAfter, Args},
    NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
    try Module:handleAfter(Args, CurState) of
       Result ->
-         handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, LeftAction, Result)
+         handleAR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, LeftAction, Result)
    catch
       throw:Result ->
-         handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, NewDebug, Timers, LeftAction, Result);
+         handleAR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, LeftAction, Result);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, CurState, NewDebug, Timers, MsgEvent)
+         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, MsgEvent)
    end.
 
-handleCR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, Result, From) ->
+handleCR(Parent, Name, Module, HibernateAfterTimeout,  Debug, Timers, CurState, Result, From) ->
    case Result of
       ok ->
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, false);
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false);
       {noreply, NewState} ->
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, false);
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, false);
       {reply, Reply, NewState} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, false);
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, NewState, false);
       {noreply, NewState, Actions} ->
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, listify(Actions));
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, listify(Actions));
       {stop, Reason, NewState} ->
-         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop});
+         terminate(exit, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, NewState,  {return, stop});
       {reply, Reply, NewState, Actions} ->
          reply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, NewDebug, Timers, listify(Actions));
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, NewState, listify(Actions));
       {stopReply, Reason, Reply, NewState} ->
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          try
-            terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, NewDebug, Timers, {return, stop_reply})
+            terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, NewState, {return, stop_reply})
          after
             _ = reply(From, Reply)
          end
    end.
 
-handleAR(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, LeftAction, Result) ->
+handleAR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, LeftAction, Result) ->
    case Result of
       ok ->
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, CurState, Debug, Timers, LeftAction);
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, LeftAction);
       {noreply, NewState} ->
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, LeftAction);
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, LeftAction);
       {noreply, NewState, Actions} ->
-         loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewState, Debug, Timers, listify(Actions) ++ LeftAction);
+         loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, listify(Actions) ++ LeftAction);
       {stop, Reason, NewState} ->
-         terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewState, Debug, Timers, {return, stop_reply})
+         terminate(exit, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, NewState, {return, stop_reply})
    end.
 
 %% loopParseActionsList
@@ -830,8 +830,8 @@ doParseAL([OneAction | LeftActions], Name, Debug, IsHib, DoAfter, Timers) ->
 doRegisterTimer(TimeoutType, NewTimerRef, TimeoutMsg, Timers) ->
    case Timers of
       #{TimeoutType := {OldTimerRef, _OldTimeMsg}} ->
-         TemTimers = cancelTimer(TimeoutType, OldTimerRef, Timers),
-         TemTimers#{TimeoutType => {NewTimerRef, TimeoutMsg}};
+         justCancelTimer(TimeoutType, OldTimerRef),
+         Timers#{TimeoutType := {NewTimerRef, TimeoutMsg}};
       _ ->
          Timers#{TimeoutType => {NewTimerRef, TimeoutMsg}}
    end.
@@ -850,6 +850,22 @@ doUpdateTimer(TimeoutType, Timers, TimeoutMsg) ->
          Timers#{TimeoutType := {TimerRef, TimeoutMsg}};
       _ ->
          Timers
+   end.
+
+justCancelTimer(TimeoutType, TimerRef) ->
+   case erlang:cancel_timer(TimerRef) of
+      false ->
+         %% 找不到计时器，我们还没有看到超时消息
+         receive
+            {timeout, TimerRef, TimeoutType} ->
+               %% 丢弃该超时消息
+               ok
+         after 0 ->
+            ok
+         end;
+      _ ->
+         %% Timer 已经运行了
+         ok
    end.
 
 cancelTimer(TimeoutType, TimerRef, Timers) ->
@@ -894,11 +910,11 @@ listHib(_) ->
 %%% always includes the stacktrace for errors and never
 %%% for exits.
 %%% ---------------------------------------------------
-terminate(Class, Reason, Stacktrace, Name, Module, CurState, Debug, _Timers, MsgEvent) ->
+terminate(Class, Reason, Stacktrace, Name, Module, Debug, _Timers, CurState, MsgEvent) ->
    Reply = try_terminate(Module, terminate_reason(Class, Reason, Stacktrace), CurState),
    case Reply of
       {'EXIT', C, R, S} ->
-         error_info({R, S}, Name, undefined, MsgEvent, Module, CurState, Debug),
+         error_info({R, S}, Name, undefined, MsgEvent, Module, Debug, CurState),
          erlang:raise(C, R, S);
       _ ->
          case {Class, Reason} of
@@ -906,7 +922,7 @@ terminate(Class, Reason, Stacktrace, Name, Module, CurState, Debug, _Timers, Msg
             {exit, shutdown} -> ok;
             {exit, {shutdown, _}} -> ok;
             _ ->
-               error_info(Reason, Name, undefined, MsgEvent, Module, CurState, Debug)
+               error_info(Reason, Name, undefined, MsgEvent, Module,  Debug, CurState)
          end
    end,
    case Stacktrace of
@@ -939,7 +955,7 @@ error_info(_Reason, application_controller, _From, _Msg, _Mod, _State, _Debug) -
    %% application_controller which is terminating - let init take care
    %% of it instead
    ok;
-error_info(Reason, Name, From, Msg, Module, State, Debug) ->
+error_info(Reason, Name, From, Msg, Module, Debug, State) ->
    Log = sys:get_log(Debug),
    ?LOG_ERROR(#{label=>{gen_server, terminate},
       name=>Name,
