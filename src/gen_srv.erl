@@ -287,7 +287,6 @@ loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, 
    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
 %%-----------------------------------------------------------------
 %% Callback functions for system messages handling.
 %%-----------------------------------------------------------------
@@ -712,8 +711,7 @@ receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState,
    end.
 
 matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, Request) ->
-   MsgEvent = {{call, From}, Request},
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
+   NewDebug = ?SYS_DEBUG(Debug, Name, {in, {{call, From}, Request}}),
    try Module:handleCall(Request, CurState, From) of
       Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From)
@@ -721,12 +719,11 @@ matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, MsgEvent)
+         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, {{call, From}, Request})
    end.
 
 matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Cast) ->
-   MsgEvent = {cast, Cast},
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
+   NewDebug = ?SYS_DEBUG(Debug, Name, {in, {cast, Cast}}),
    try Module:handleCast(Cast, CurState) of
       Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false)
@@ -734,12 +731,11 @@ matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, MsgEvent)
+         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, {cast, Cast})
    end.
 
 matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg) ->
-   MsgEvent = {info, Msg},
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
+   NewDebug = ?SYS_DEBUG(Debug, Name, {in, {info, Msg}}),
    try Module:handleInfo(Msg, CurState) of
       Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false)
@@ -747,12 +743,11 @@ matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, MsgEvent)
+         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, {info, Msg})
    end.
 
 doAfterCall(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, LeftAction, Args) ->
-   MsgEvent = {doAfter, Args},
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, MsgEvent}),
+   NewDebug = ?SYS_DEBUG(Debug, Name, {in, {doAfter, Args}}),
    try Module:handleAfter(Args, CurState) of
       Result ->
          handleAR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, LeftAction, Result)
@@ -760,7 +755,7 @@ doAfterCall(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState
       throw:Result ->
          handleAR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, LeftAction, Result);
       Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, MsgEvent)
+         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, {doAfter, Args})
    end.
 
 handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Result, From) ->
