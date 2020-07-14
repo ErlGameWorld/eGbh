@@ -454,11 +454,6 @@ cast({via, RegMod, Name}, Msg) ->
    ok
    catch _:_ -> ok
    end;
-cast({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
-   try erlang:send(Dest, {'$gen_cast', Msg}),
-   ok
-   catch _:_ -> ok
-   end;
 cast(Dest, Msg) ->
    try erlang:send(Dest, {'$gen_cast', Msg}),
    ok
@@ -473,11 +468,6 @@ send({global, Name}, Msg) ->
    end;
 send({via, RegMod, Name}, Msg) ->
    try RegMod:send(Name, Msg),
-   ok
-   catch _:_ -> ok
-   end;
-send({Name, Node} = Dest, Msg) when is_atom(Name), is_atom(Node) ->
-   try erlang:send(Dest, Msg),
    ok
    catch _:_ -> ok
    end;

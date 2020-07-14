@@ -2,7 +2,7 @@
 
 -behavior(gen_server).
 
--compile([export_all]).
+-compile([export_all, nowarn_export_all]).
 
 start() ->
    gen_server:start(?MODULE, 0, []).
