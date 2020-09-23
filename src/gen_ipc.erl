@@ -88,7 +88,7 @@
 %% 事件类型
 -type eventType() :: externalEventType() | timeoutEventType() | {'onevent', Subtype :: term()}.
 -type externalEventType() :: {'call', From :: from()} | 'cast' | 'info'.
--type timeoutEventType() :: 'eTimeout' | 'sTimeout' | {'gTimeout', Name :: term()}.
+-type timeoutEventType() :: 'eTimeout' | 'sTimeout' | GTimeoutName :: term().              %% 后面的GTimeoutName这个是通用超时标识名
 
 %% 是否捕捉信号 gen_event管理进程需要设置该参数为true
 -type isTrapExit() :: boolean().
@@ -295,19 +295,6 @@
    epmSup = undefined :: 'undefined' | pid(),
    epmS :: term()
 }).
-
-% isEventType(Type) ->
-%    case Type of
-%       'cast' -> true;
-%       'info' -> true;
-%       'eTimeout' -> true;
-%       'sTimeout' -> true;
-%       {'call', _Form} -> true;
-%       {'gTimeout', _Name} -> true;
-%       {'onevent', _SubType} -> true;
-%       _ ->
-%          false
-%    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% start stop API start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -type serverName() ::
