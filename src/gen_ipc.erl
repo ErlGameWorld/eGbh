@@ -88,7 +88,7 @@
 %% 事件类型
 -type eventType() :: externalEventType() | timeoutEventType() | {'onevent', Subtype :: term()}.
 -type externalEventType() :: {'call', From :: from()} | 'cast' | 'info'.
--type timeoutEventType() :: 'eTimeout' | 'sTimeout' | GTimeoutName :: term().              %% 后面的GTimeoutName这个是通用超时标识名
+-type timeoutEventType() :: GTimeoutName :: term() | 'eTimeout' | 'sTimeout'.              %% 前面的GTimeoutName这个是通用超时标识名
 
 %% 是否捕捉信号 gen_event管理进程需要设置该参数为true
 -type isTrapExit() :: boolean().
