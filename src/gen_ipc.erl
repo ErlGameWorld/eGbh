@@ -1764,9 +1764,17 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
 %    end.
 
 %% 进行状态转换
-performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, [CurEvent | LeftEvents], NextEs, IsPos, IsHib, DoAfter) ->
+performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, AllLeftEvents, NextEs, IsPos, IsHib, DoAfter) ->
    %% 已收集所有选项，并缓冲next_events。执行实际状态转换。如果推迟则将当前事件移至推迟
    %% 此时 NextEs的顺序与最开始出现的顺序相反. 后面执行的顺序 当前新增事件 + 反序的Postpone事件 + LeftEvents
+   case AllLeftEvents of
+      [] ->
+         CurEvent = undefined,
+         LeftEvents = [];
+      _ ->
+         [CurEvent | LeftEvents] = AllLeftEvents
+   end,
+
    NewDebug = ?SYS_DEBUG(Debug, Name, case IsPos of true -> {postpone, CurEvent, CurStatus, NewStatus}; _ -> {consume, CurEvent, CurStatus, NewStatus} end),
    if
       CurStatus =:= NewStatus ->
