@@ -107,7 +107,7 @@
 
 
 -callback handleCall(Request :: term(), State :: term(), From :: {pid(), Tag :: term()}) ->
-   ok |
+   kpS |
    {reply, Reply :: term()} |
    {reply, Reply :: term(), NewState :: term()} |
    {reply, Reply :: term(), NewState :: term(), Actions :: actions()} |
@@ -117,19 +117,19 @@
    {stopReply, Reason :: term(), Reply :: term(), NewState :: term()}.
 
 -callback handleCast(Request :: term(), State :: term()) ->
-   ok |
+   kpS |
    {noreply, NewState :: term()} |
    {noreply, NewState :: term(), Actions :: actions()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleInfo(Info :: timeout | term(), State :: term()) ->
-   ok |
+   kpS |
    {noreply, NewState :: term()} |
    {noreply, NewState :: term(), Actions :: actions()} |
    {stop, Reason :: term(), NewState :: term()}.
 
 -callback handleAfter(Info :: term(), State :: term()) ->
-   ok |
+   kpS |
    {noreply, NewState :: term()} |
    {noreply, NewState :: term(), Actions :: actions()} |
    {stop, Reason :: term(), NewState :: term()}.
@@ -750,7 +750,7 @@ doAfterCall(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState
 
 handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Result, From) ->
    case Result of
-      ok ->
+      kpS ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false);
       {reply, Reply} ->
          reply(From, Reply),
@@ -781,7 +781,7 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, R
 
 handleAR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, LeftAction, Result) ->
    case Result of
-      ok ->
+      kpS ->
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, LeftAction);
       {noreply, NewState} ->
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, LeftAction);
@@ -829,7 +829,7 @@ doParseAL([OneAction | LeftActions], Name, Debug, IsHib, DoAfter, Timers) ->
          NewTimers = doCancelTimer(TimeoutName, Timers),
          doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, NewTimers);
       infinity ->
-         ok;
+         doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, Timers);
       Timeout when is_integer(Timeout) ->
          erlang:send_after(Timeout, self(), timeout),
          NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {timeout, Timeout, timeout, []}}),
