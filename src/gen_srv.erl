@@ -197,7 +197,7 @@ doModuleInit(Module, Args) ->
       Module:init(Args)
    catch
       throw:Ret -> Ret;
-      Class:Reason:Stacktrace -> {'EXIT', Class, Reason, Stacktrace}
+      Class:Reason -> {'EXIT', Class, Reason, ?STACKTRACE()}
    end.
 
 init_it(Starter, self, ServerRef, Module, Args, Options) ->
@@ -334,8 +334,8 @@ call(ServerRef, Request) ->
    try gen:call(ServerRef, '$gen_call', Request) of
       {ok, Reply} ->
          Reply
-   catch Class:Reason:Stacktrace ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, Stacktrace)
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, ?STACKTRACE())
    end.
 
 -spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout() |{'clean_timeout', T :: timeout()} | {'dirty_timeout', T :: timeout()}) -> Reply :: term().
@@ -343,15 +343,15 @@ call(ServerRef, Request, infinity) ->
    try gen:call(ServerRef, '$gen_call', Request, infinity) of
       {ok, Reply} ->
          Reply
-   catch Class:Reason:Stacktrace ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, Stacktrace)
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, ?STACKTRACE())
    end;
 call(ServerRef, Request, {dirty_timeout, T} = Timeout) ->
    try gen:call(ServerRef, '$gen_call', Request, T) of
       {ok, Reply} ->
          Reply
-   catch Class:Reason:Stacktrace ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace)
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, ?STACKTRACE())
    end;
 call(ServerRef, Request, {clean_timeout, T} = Timeout) ->
    callClean(ServerRef, Request, Timeout, T);
@@ -370,8 +370,8 @@ callClean(ServerRef, Request, Timeout, T) ->
             try gen:call(ServerRef, '$gen_call', Request, T) of
                Result ->
                   {Ref, Result}
-            catch Class:Reason:Stacktrace ->
-               {Ref, Class, Reason, Stacktrace}
+            catch Class:Reason ->
+               {Ref, Class, Reason, ?STACKTRACE()}
             end
       end),
    Mref = monitor(process, Pid),
@@ -708,8 +708,8 @@ matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
    catch
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, {{call, From}, Request})
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, CurState, {{call, From}, Request})
    end.
 
 matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Cast) ->
@@ -720,8 +720,8 @@ matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
    catch
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, {cast, Cast})
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, CurState, {cast, Cast})
    end.
 
 matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg) ->
@@ -732,8 +732,8 @@ matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
    catch
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, {info, Msg})
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, CurState, {info, Msg})
    end.
 
 doAfterCall(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, LeftAction, Args) ->
@@ -744,8 +744,8 @@ doAfterCall(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState
    catch
       throw:Result ->
          handleAR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, LeftAction, Result);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Name, Module, NewDebug, Timers, CurState, {doAfter, Args})
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, CurState, {doAfter, Args})
    end.
 
 handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Result, From) ->
@@ -953,8 +953,8 @@ try_terminate(Mod, Reason, State) ->
          catch
             throw:R ->
                {ok, R};
-            Class:R:Stacktrace ->
-               {'EXIT', Class, R, Stacktrace}
+            Class:R ->
+               {'EXIT', Class, R, ?STACKTRACE()}
          end;
       false ->
          {ok, ok}

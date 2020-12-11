@@ -365,7 +365,7 @@ doModuleInit(Module, Args) ->
       Module:init(Args)
    catch
       throw:Ret -> Ret;
-      Class:Reason:Stacktrace -> {'EXIT', Class, Reason, Stacktrace}
+      Class:Reason -> {'EXIT', Class, Reason, ?STACKTRACE()}
    end.
 
 init_it(Starter, self, ServerRef, Module, Args, Opts) ->
@@ -507,8 +507,8 @@ call(ServerRef, Request) ->
    try gen:call(ServerRef, '$gen_call', Request) of
       {ok, Reply} ->
          Reply
-   catch Class:Reason:Stacktrace ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, Stacktrace)
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, ?STACKTRACE())
    end.
 
 -spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout() |{'clean_timeout', T :: timeout()} | {'dirty_timeout', T :: timeout()}) -> Reply :: term().
@@ -516,15 +516,15 @@ call(ServerRef, Request, infinity) ->
    try gen:call(ServerRef, '$gen_call', Request, infinity) of
       {ok, Reply} ->
          Reply
-   catch Class:Reason:Stacktrace ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, Stacktrace)
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, ?STACKTRACE())
    end;
 call(ServerRef, Request, {dirty_timeout, T} = Timeout) ->
    try gen:call(ServerRef, '$gen_call', Request, T) of
       {ok, Reply} ->
          Reply
-   catch Class:Reason:Stacktrace ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace)
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, ?STACKTRACE())
    end;
 call(ServerRef, Request, {clean_timeout, T} = Timeout) ->
    callClean(ServerRef, Request, Timeout, T);
@@ -543,8 +543,8 @@ callClean(ServerRef, Request, Timeout, T) ->
             try gen:call(ServerRef, '$gen_call', Request, T) of
                Result ->
                   {Ref, Result}
-            catch Class:Reason:Stacktrace ->
-               {Ref, Class, Reason, Stacktrace}
+            catch Class:Reason ->
+               {Ref, Class, Reason, ?STACKTRACE()}
             end
       end),
    Mref = monitor(process, Pid),
@@ -855,16 +855,16 @@ epmRpc(EpmSrv, Cmd) ->
    try gen:call(EpmSrv, '$epm_call', Cmd, infinity) of
       {ok, Reply} ->
          Reply
-   catch Class:Reason:Stacktrace ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, infinity]}}, Stacktrace)
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, infinity]}}, ?STACKTRACE())
    end.
 
 epmRpc(EpmSrv, Cmd, Timeout) ->
    try gen:call(EpmSrv, '$epm_call', Cmd, Timeout) of
       {ok, Reply} ->
          Reply
-   catch Class:Reason:Stacktrace ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, Timeout]}}, Stacktrace)
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [EpmSrv, Cmd, Timeout]}}, ?STACKTRACE())
    end.
 
 -spec call_notify(serverRef(), term()) -> 'ok'.
@@ -928,8 +928,8 @@ doAddEpm(EpmHers, {Module, _SubId} = EpmId, Args, EpmSup) ->
          catch
             throw:Ret ->
                addNewEpm(Ret, EpmHers, Module, EpmId, EpmSup);
-            C:R:T ->
-               {{error, {C, R, T}}, EpmHers, false}
+            C:R ->
+               {{error, {C, R, ?STACKTRACE()}}, EpmHers, false}
          end
    end;
 doAddEpm(EpmHers, Module, Args, EpmSup) ->
@@ -943,8 +943,8 @@ doAddEpm(EpmHers, Module, Args, EpmSup) ->
          catch
             throw:Ret ->
                addNewEpm(Ret, EpmHers, Module, Module, EpmSup);
-            C:R:T ->
-               {{error, {C, R, T}}, EpmHers, false}
+            C:R ->
+               {{error, {C, R, ?STACKTRACE()}}, EpmHers, false}
          end
    end.
 
@@ -999,8 +999,8 @@ doEpmHandle(EpmHers, EpmHandler, Func, Event, From) ->
          catch
             throw:Ret ->
                handleEpmCR(Ret, EpmHers, EpmHer, Event, From);
-            C:R:S ->
-               epmTerminate(EpmHer, {error, {C, R, S}}, Event, crash),
+            C:R ->
+               epmTerminate(EpmHer, {error, {C, R, ?STACKTRACE()}}, Event, crash),
                NewEpmHers = maps:remove(EpmHandler, EpmHer),
                {NewEpmHers, false}
          end;
@@ -1188,8 +1188,8 @@ matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Post
    catch
       throw:Result ->
          handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, From);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
    end.
 
 matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Cast) ->
@@ -1201,8 +1201,8 @@ matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Post
    catch
       throw:Result ->
          handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
    end.
 
 matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg) ->
@@ -1214,8 +1214,8 @@ matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Post
    catch
       throw:Result ->
          handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
    end.
 
 matchTimeoutMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, TimeoutType, TimeoutMsg) ->
@@ -1227,8 +1227,8 @@ matchTimeoutMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, P
    catch
       throw:Result ->
          handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
    end.
 
 matchEpmCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request) ->
@@ -1286,8 +1286,8 @@ startEpmCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Post
          catch
             throw:Ret ->
                handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [Event], Ret, ?CB_FORM_EVENT, false);
-            Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [Event])
+            Class:Reason ->
+               terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [Event])
          end;
       _ ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib)
@@ -1300,8 +1300,8 @@ startEnterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Po
    catch
       throw:Result ->
          handleEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, Result);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
    end.
 
 startAfterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Args) ->
@@ -1311,8 +1311,8 @@ startAfterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Po
    catch
       throw:Result ->
          handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_AFTER, false);
-      Class:Reason:Stacktrace ->
-         terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+      Class:Reason ->
+         terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
    end.
 
 startEventCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, {Type, Content}) ->
@@ -1324,8 +1324,8 @@ startEventCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Po
          catch
             throw:Ret ->
                handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
-            Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+            Class:Reason ->
+               terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
          end;
       'info' ->
          try Module:handleInfo(Content, CurStatus, CurState) of
@@ -1334,8 +1334,8 @@ startEventCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Po
          catch
             throw:Ret ->
                handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
-            Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+            Class:Reason ->
+               terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
          end;
       {'call', From} ->
          try Module:handleCall(Content, CurStatus, CurState, From) of
@@ -1344,8 +1344,8 @@ startEventCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Po
          catch
             throw:Ret ->
                handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, From);
-            Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+            Class:Reason ->
+               terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
          end;
       _ ->
          try Module:handleOnevent(Type, Content, CurStatus, CurState) of
@@ -1354,8 +1354,8 @@ startEventCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Po
          catch
             throw:Ret ->
                handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
-            Class:Reason:Stacktrace ->
-               terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+            Class:Reason ->
+               terminate(Class, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
          end
    end.
 
@@ -2014,9 +2014,9 @@ terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout
             _ -> ok
          catch
             throw:_ -> ok;
-            C:R:ST ->
-               error_info(C, R, ST, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents),
-               erlang:raise(C, R, ST)
+            C:R ->
+               error_info(C, R, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents),
+               erlang:raise(C, R, ?STACKTRACE())
          end;
       false ->
          ok
