@@ -1142,35 +1142,38 @@ reLoopEntry(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postp
 %% 接收新的消息
 receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib) ->
    receive
-      {'$gen_call', From, Request} ->
-         matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request);
-      {'$gen_cast', Cast} ->
-         matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Cast);
-      {timeout, TimerRef, TimeoutType} = Msg ->
-         case Timers of
-            #{TimeoutType := {TimerRef, TimeoutMsg}} ->
-               NewTimers = maps:remove(TimeoutType, Timers),
-               matchTimeoutMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, Debug, TimeoutType, TimeoutMsg);
+      Msg ->
+         case Msg of
+            {'$gen_call', From, Request} ->
+               matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request);
+            {'$gen_cast', Cast} ->
+               matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Cast);
+            {timeout, TimerRef, TimeoutType} ->
+               case Timers of
+                  #{TimeoutType := {TimerRef, TimeoutMsg}} ->
+                     NewTimers = maps:remove(TimeoutType, Timers),
+                     matchTimeoutMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, Debug, TimeoutType, TimeoutMsg);
+                  _ ->
+                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
+               end;
+            {system, PidFrom, Request} ->
+               %% 不返回但尾递归调用 system_continue/3
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}, IsHib);
+            {'EXIT', PidFrom, Reason} ->
+               case Parent =:= PidFrom of
+                  true ->
+                     terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, []);
+                  _ ->
+                     NewEpmHers = epmStopOne(PidFrom, EpmHers),
+                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
+               end;
+            {'$epm_call', From, Request} ->
+               matchEpmCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request);
+            {'$epm_info', CmdOrEmpHandler, Event} ->
+               matchEpmInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, CmdOrEmpHandler, Event);
             _ ->
                matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
-         end;
-      {system, PidFrom, Request} ->
-         %% 不返回但尾递归调用 system_continue/3
-         sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}, IsHib);
-      {'EXIT', PidFrom, Reason} = Msg ->
-         case Parent =:= PidFrom of
-            true ->
-               terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, []);
-            _ ->
-               NewEpmHers = epmStopOne(PidFrom, EpmHers),
-               matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
-         end;
-      {'$epm_call', From, Request} ->
-         matchEpmCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request);
-      {'$epm_info', CmdOrEmpHandler, Event} ->
-         matchEpmInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, CmdOrEmpHandler, Event);
-      Msg ->
-         matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
+         end
    after
       HibernateAfterTimeout ->
          proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib])

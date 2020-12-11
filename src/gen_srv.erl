@@ -673,26 +673,29 @@ start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
 
 receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, IsHib) ->
    receive
-      {'$gen_call', From, Request} ->
-         matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, Request);
-      {'$gen_cast', Cast} ->
-         matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Cast);
-      {timeout, TimerRef, TimeoutName} = Msg ->
-         case Timers of
-            #{TimeoutName := {TimerRef, TimeoutMsg}} ->
-               NewTimer = maps:remove(TimeoutName, Timers),
-               matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, NewTimer, CurState, TimeoutMsg);
+      Msg ->
+         case Msg of
+            {'$gen_call', From, Request} ->
+               matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, Request);
+            {'$gen_cast', Cast} ->
+               matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Cast);
+            {timeout, TimerRef, TimeoutName} ->
+               case Timers of
+                  #{TimeoutName := {TimerRef, TimeoutMsg}} ->
+                     NewTimer = maps:remove(TimeoutName, Timers),
+                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, NewTimer, CurState, TimeoutMsg);
+                  _ ->
+                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg)
+               end;
+            {system, PidFrom, Request} ->
+               %% 不返回但尾递归调用 system_continue/3
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib}, IsHib);
+
+            {'EXIT', Parent, Reason} ->
+               terminate(Reason, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, CurState, Msg);
             _ ->
                matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg)
-         end;
-      {system, PidFrom, Request} ->
-         %% 不返回但尾递归调用 system_continue/3
-         sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib}, IsHib);
-
-      {'EXIT', Parent, Reason} = Msg ->
-         terminate(Reason, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, CurState, Msg);
-      Msg ->
-         matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg)
+         end
    after HibernateAfterTimeout ->
       proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState])
    end.
