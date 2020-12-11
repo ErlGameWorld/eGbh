@@ -7,7 +7,7 @@
 start() ->
    gen_server:start(?MODULE, 0, []).
 
-init(_Args)  ->
+init(_Args) ->
    {ok, 0}.
 
 handle_call(ping, _From, State) ->

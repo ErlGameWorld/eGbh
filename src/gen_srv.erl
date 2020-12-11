@@ -967,17 +967,18 @@ error_info(_Reason, application_controller, _From, _Msg, _Mod, _State, _Debug) -
    ok;
 error_info(Reason, Name, From, Msg, Module, Debug, State) ->
    Log = sys:get_log(Debug),
-   ?LOG_ERROR(#{label=>{gen_server, terminate},
-      name=>Name,
-      last_message=>Msg,
-      state=>format_status(terminate, Module, get(), State),
-      log=>format_log_state(Module, Log),
-      reason=>Reason,
-      client_info=>client_stacktrace(From)},
-      #{domain=>[otp],
-         report_cb=>fun gen_server:format_log/2,
-         error_logger=>#{tag=>error,
-            report_cb=>fun gen_server:format_log/1}}),
+   ?LOG_ERROR(#{label => {gen_server, terminate},
+      name => Name,
+      last_message => Msg,
+      state => format_status(terminate, Module, get(), State),
+      log => format_log_state(Module, Log),
+      reason => Reason,
+      client_info => client_stacktrace(From)},
+      #{
+         domain => [otp],
+         report_cb => fun gen_server:format_log/2,
+         error_logger => #{tag => error, report_cb => fun gen_server:format_log/1}
+      }),
    ok.
 
 client_stacktrace(undefined) ->
@@ -1012,21 +1013,23 @@ format_log(Report) ->
 
 limit_report(Report, unlimited) ->
    Report;
-limit_report(#{label:={gen_server, terminate},
-   last_message:=Msg,
-   state:=State,
-   log:=Log,
-   reason:=Reason,
-   client_info:=Client} = Report,
+limit_report(#{label := {gen_server, terminate},
+   last_message := Msg,
+   state := State,
+   log := Log,
+   reason := Reason,
+   client_info := Client} = Report,
    Depth) ->
-   Report#{last_message=>io_lib:limit_term(Msg, Depth),
-      state=>io_lib:limit_term(State, Depth),
-      log=>[io_lib:limit_term(L, Depth) || L <- Log],
-      reason=>io_lib:limit_term(Reason, Depth),
-      client_info=>limit_client_report(Client, Depth)};
-limit_report(#{label:={gen_server, no_handle_info},
-   message:=Msg} = Report, Depth) ->
-   Report#{message=>io_lib:limit_term(Msg, Depth)}.
+   Report#{
+      last_message => io_lib:limit_term(Msg, Depth),
+      state => io_lib:limit_term(State, Depth),
+      log => [io_lib:limit_term(L, Depth) || L <- Log],
+      reason => io_lib:limit_term(Reason, Depth),
+      client_info => limit_client_report(Client, Depth)
+   };
+limit_report(#{label := {gen_server, no_handle_info},
+   message := Msg} = Report, Depth) ->
+   Report#{message => io_lib:limit_term(Msg, Depth)}.
 
 limit_client_report({From, {Name, Stacktrace}}, Depth) ->
    {From, {Name, io_lib:limit_term(Stacktrace, Depth)}};
@@ -1043,22 +1046,22 @@ format_log(Report, FormatOpts0) ->
    FormatOpts = maps:merge(Default, FormatOpts0),
    IoOpts =
       case FormatOpts of
-         #{chars_limit:=unlimited} ->
+         #{chars_limit := unlimited} ->
             [];
-         #{chars_limit:=Limit} ->
+         #{chars_limit := Limit} ->
             [{chars_limit, Limit}]
       end,
    {Format, Args} = format_log_single(Report, FormatOpts),
    io_lib:format(Format, Args, IoOpts).
 
-format_log_single(#{label:={gen_server, terminate},
-   name:=Name,
-   last_message:=Msg,
-   state:=State,
-   log:=Log,
-   reason:=Reason,
-   client_info:=Client},
-   #{single_line:=true, depth:=Depth} = FormatOpts) ->
+format_log_single(#{label := {gen_server, terminate},
+   name := Name,
+   last_message := Msg,
+   state := State,
+   log := Log,
+   reason := Reason,
+   client_info := Client},
+   #{single_line := true, depth := Depth} = FormatOpts) ->
    P = p(FormatOpts),
    Format1 = lists:append(["Generic server ", P, " terminating. Reason: ", P,
       ". Last message: ", P, ". State: ", P, "."]),
@@ -1074,10 +1077,10 @@ format_log_single(#{label:={gen_server, terminate},
       end,
    {Format1 ++ ServerLogFormat ++ ClientLogFormat,
          Args1 ++ ServerLogArgs ++ ClientLogArgs};
-format_log_single(#{label:={gen_server, no_handle_info},
-   module:=Module,
-   message:=Msg},
-   #{single_line:=true, depth:=Depth} = FormatOpts) ->
+format_log_single(#{label := {gen_server, no_handle_info},
+   module := Module,
+   message := Msg},
+   #{single_line := true, depth := Depth} = FormatOpts) ->
    P = p(FormatOpts),
    Format = lists:append(["Undefined handle_info in ", P,
       ". Unhandled message: ", P, "."]),
@@ -1092,14 +1095,14 @@ format_log_single(#{label:={gen_server, no_handle_info},
 format_log_single(Report, FormatOpts) ->
    format_log_multi(Report, FormatOpts).
 
-format_log_multi(#{label:={gen_server, terminate},
-   name:=Name,
-   last_message:=Msg,
-   state:=State,
-   log:=Log,
-   reason:=Reason,
-   client_info:=Client},
-   #{depth:=Depth} = FormatOpts) ->
+format_log_multi(#{label := {gen_server, terminate},
+   name := Name,
+   last_message := Msg,
+   state := State,
+   log := Log,
+   reason := Reason,
+   client_info := Client},
+   #{depth := Depth} = FormatOpts) ->
    Reason1 = fix_reason(Reason),
    {ClientFmt, ClientArgs} = format_client_log(Client, FormatOpts),
    P = p(FormatOpts),
@@ -1131,10 +1134,10 @@ format_log_multi(#{label:={gen_server, terminate},
                end ++ ClientArgs
       end,
    {Format, Args};
-format_log_multi(#{label:={gen_server, no_handle_info},
-   module:=Module,
-   message:=Msg},
-   #{depth:=Depth} = FormatOpts) ->
+format_log_multi(#{label := {gen_server, no_handle_info},
+   module := Module,
+   message := Msg},
+   #{depth := Depth} = FormatOpts) ->
    P = p(FormatOpts),
    Format =
       "** Undefined handle_info in ~p~n"
@@ -1214,7 +1217,7 @@ format_client_log({_From, {Name, Stacktrace}}, FormatOpts) ->
       end,
    {Format, Args}.
 
-p(#{single_line:=Single, depth:=Depth, encoding:=Enc}) ->
+p(#{single_line := Single, depth := Depth, encoding := Enc}) ->
    "~" ++ single(Single) ++ mod(Enc) ++ p(Depth);
 p(unlimited) ->
    "p";

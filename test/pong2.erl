@@ -7,7 +7,7 @@
 start() ->
    gen_srv:start(?MODULE, 0, []).
 
-init(_Args)  ->
+init(_Args) ->
    {ok, 0}.
 
 handleCall(ping, _State, _From) ->

@@ -1050,11 +1050,11 @@ report_error(_EpmHer, {swapped, _, _}, _, _) -> ok;
 report_error(#epmHer{epmId = EpmId, epmM = EpmM}, Reason, State, LastIn) ->
    ?LOG_ERROR(
       #{
-         label=>{gen_ipc, epm_terminate},
+         label => {gen_ipc, epm_terminate},
          handler => {EpmId, EpmM},
          name => undefined,
          last_message => LastIn,
-         state=> State,
+         state => State,
          reason => Reason
       },
       #{
@@ -2096,15 +2096,17 @@ format_log(Report) ->
 limit_report(Report, unlimited) ->
    Report;
 limit_report(
-   #{label:={gen_ipc, terminate},
-      queue:=Q,
-      postponed:=Postponed,
-      module:=Module,
-      status:=FmtData,
-      timeouts:=Timeouts,
-      log:=Log,
-      reason:={Class, Reason, Stacktrace},
-      client_info:=ClientInfo} = Report,
+   #{
+      label := {gen_ipc, terminate},
+      queue := Q,
+      postponed := Postponed,
+      module := Module,
+      status := FmtData,
+      timeouts := Timeouts,
+      log := Log,
+      reason := {Class, Reason, Stacktrace},
+      client_info := ClientInfo
+   } = Report,
    Depth) ->
    Report#{
       queue =>
@@ -2153,25 +2155,26 @@ format_log(Report, FormatOpts0) ->
    FormatOpts = maps:merge(Default, FormatOpts0),
    IoOpts =
       case FormatOpts of
-         #{chars_limit:=unlimited} -> [];
-         #{chars_limit:=Limit} -> [{chars_limit, Limit}]
+         #{chars_limit := unlimited} -> [];
+         #{chars_limit := Limit} -> [{chars_limit, Limit}]
       end,
    {Format, Args} = format_log_single(Report, FormatOpts),
    io_lib:format(Format, Args, IoOpts).
 
 format_log_single(
    #{
-      label:={gen_ipc, terminate},
-      name:=Name,
-      queue:=Q,
+      label := {gen_ipc, terminate},
+      name := Name,
+      queue := Q,
       %% postponed
       %% isEnter
-      status:=FmtData,
+      status := FmtData,
       %% timeouts
-      log:=Log,
-      reason:={Class, Reason, Stacktrace},
-      client_info:=ClientInfo},
-   #{single_line:=true, depth:=Depth} = FormatOpts) ->
+      log := Log,
+      reason := {Class, Reason, Stacktrace},
+      client_info := ClientInfo
+   },
+   #{single_line := true, depth := Depth} = FormatOpts) ->
    P = p(FormatOpts),
    {FixedReason, FixedStacktrace} = fix_reason(Class, Reason, Stacktrace),
    {ClientFmt, ClientArgs} = format_client_log_single(ClientInfo, P, Depth),
@@ -2221,18 +2224,19 @@ format_log_single(Report, FormatOpts) ->
 
 format_log_multi(
    #{
-      label:={gen_ipc, terminate},
-      name:=Name,
-      queue:=Q,
-      postponed:=Postponed,
-      module:=Module,
-      isEnter:=StateEnter,
-      status:=FmtData,
-      timeouts:=Timeouts,
-      log:=Log,
-      reason:={Class, Reason, Stacktrace},
-      client_info:=ClientInfo},
-   #{depth:=Depth} = FormatOpts) ->
+      label := {gen_ipc, terminate},
+      name := Name,
+      queue := Q,
+      postponed := Postponed,
+      module := Module,
+      isEnter := StateEnter,
+      status := FmtData,
+      timeouts := Timeouts,
+      log := Log,
+      reason := {Class, Reason, Stacktrace},
+      client_info := ClientInfo
+   },
+   #{depth := Depth} = FormatOpts) ->
    P = p(FormatOpts),
    {FixedReason, FixedStacktrace} = fix_reason(Class, Reason, Stacktrace),
    {ClientFmt, ClientArgs} = format_client_log(ClientInfo, P, Depth),
@@ -2375,7 +2379,7 @@ format_client_log({_Pid, {Name, Stacktrace}}, P, Depth) ->
       end,
    {Format, Args}.
 
-p(#{single_line:=Single, depth:=Depth, encoding:=Enc}) ->
+p(#{single_line := Single, depth := Depth, encoding := Enc}) ->
    "~" ++ single(Single) ++ mod(Enc) ++ p(Depth);
 p(unlimited) ->
    "p";
