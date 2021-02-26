@@ -14,7 +14,7 @@
    {error, Reason :: term()}.
 
 -callback handleEvent(Event :: term(), State :: term()) ->
-   ok |
+   kpS |
    removeEpm |
    {ok, NewState :: term()} |
    {ok, NewState :: term(), hibernate} |
@@ -28,7 +28,7 @@
    {swapEpm, Reply :: term(), NewState :: term(), Args1 :: term(), NewHandler :: gen_ipc:epmHandler(), Args2 :: term()}.
 
 -callback handleInfo(Info :: term(), State :: term()) ->
-   ok |
+   kpS |
    removeEpm |
    {ok, NewState :: term()} |
    {ok, NewState :: term(), hibernate} |

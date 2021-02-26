@@ -2,6 +2,13 @@
     封装与收集各种有用的erlang行为
     最初目的是想造个非常统一又通用的行为模式-基于这个想法-封装了gen_ipc行为模块
     基于gen_ipc gen_srv 基于Otp23.0.2编写 运行otp版本21+
+
+# 简写备注
+    gen_ipc         gen_information_processing_cell   
+    gen_srv         gen_server
+    gen_epm         gen_event_processing module
+    gen_emm         gen_event_management module
+    gen_tcm         gen_tcp_callback_module
     
 # gen_ipc
     erlang中存在application, supervisor, gen_server, gen_event, gen_fsm, gen_statem各种行为, 学习otp也都会学习这些行为， 实际项目中也经常会用这些行为，
