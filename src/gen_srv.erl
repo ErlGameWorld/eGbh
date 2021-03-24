@@ -11,7 +11,7 @@
    , start_monitor/3, start_monitor/4
    , stop/1, stop/3
    , call/2, call/3
-   , send_request/2, wait_response/2, check_response/2
+   , send_request/2, wait_response/2, receive_response/2, check_response/2
    , cast/2, send/2, reply/1, reply/2
    , abcast/2, abcast/3
    , multi_call/2, multi_call/3, multi_call/4
@@ -197,7 +197,7 @@ doModuleInit(Module, Args) ->
       Module:init(Args)
    catch
       throw:Ret -> Ret;
-      Class:Reason -> {'EXIT', Class, Reason, ?STACKTRACE()}
+      Class:Reason:Strace -> {'EXIT', Class, Reason, Strace}
    end.
 
 init_it(Starter, self, ServerRef, Module, Args, Options) ->
@@ -521,6 +521,9 @@ reply(Replies) when is_list(Replies) ->
    ok.
 
 -spec reply(From :: from(), Reply :: term()) -> ok.
+reply({_To, [alias|Alias] = Tag}, Reply) ->
+   Alias ! {Tag, Reply},
+   ok;
 reply({To, Tag}, Reply) ->
    try To ! {Tag, Reply},
    ok
@@ -541,6 +544,10 @@ send_request(Name, Request) ->
    {reply, Reply :: term()} | 'timeout' | {error, {Reason :: term(), serverRef()}}.
 wait_response(RequestId, Timeout) ->
    gen:wait_response(RequestId, Timeout).
+
+-spec receive_response(RequestId::requestId(), timeout()) -> {reply, Reply::term()} | 'timeout' | {error, {Reason::term(), serverRef()}}.
+receive_response(RequestId, Timeout) ->
+   gen:receive_response(RequestId, Timeout).
 
 -spec check_response(Msg :: term(), RequestId :: requestId()) ->
    {reply, Reply :: term()} | 'no_reply' | {error, {Reason :: term(), serverRef()}}.
@@ -708,8 +715,8 @@ matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
    catch
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From);
-      Class:Reason ->
-         terminate(Class, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, CurState, {{call, From}, Request})
+      Class:Reason:Strace ->
+         terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {{call, From}, Request})
    end.
 
 matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Cast) ->
@@ -720,8 +727,8 @@ matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
    catch
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
-      Class:Reason ->
-         terminate(Class, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, CurState, {cast, Cast})
+      Class:Reason:Strace ->
+         terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {cast, Cast})
    end.
 
 matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg) ->
@@ -732,8 +739,8 @@ matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
    catch
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
-      Class:Reason ->
-         terminate(Class, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, CurState, {info, Msg})
+      Class:Reason:Strace ->
+         terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {info, Msg})
    end.
 
 doAfterCall(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, LeftAction, Args) ->
@@ -744,8 +751,8 @@ doAfterCall(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState
    catch
       throw:Result ->
          handleAR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, LeftAction, Result);
-      Class:Reason ->
-         terminate(Class, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, CurState, {doAfter, Args})
+      Class:Reason:Strace ->
+         terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {doAfter, Args})
    end.
 
 handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Result, From) ->

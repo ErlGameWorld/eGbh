@@ -14,7 +14,7 @@
    , stop/1, stop/3
    , call/3, call/4
    , send/3
-   , send_request/3, wait_response/2, check_response/2
+   , send_request/3, wait_response/2, receive_response/2, check_response/2
    , info_notify/2, call_notify/2
    , add_epm/3, add_sup_epm/3, del_epm/3
    , swap_epm/3, swap_sup_epm/3
@@ -104,6 +104,7 @@
    {'ok', {pid(), reference()}} |
    {'error', term()}.
 
+-type from() :: {To :: pid(), Tag :: term()}.
 -type requestId() :: term().
 
 -record(epmHer, {
@@ -246,7 +247,7 @@ which_epm(EpmSrv) ->
 
 -spec info_notify(serverRef(), term()) -> 'ok'.
 info_notify(EpmSrv, Event) ->
-   epmRequest(EpmSrv, {'$gen_info', '$infoNotify', Event}).
+   epmRequest(EpmSrv, {'$epm_info', '$infoNotify', Event}).
 
 -spec call_notify(serverRef(), term()) -> 'ok'.
 call_notify(EpmSrv, Event) ->
@@ -261,16 +262,22 @@ call(EpmSrv, EpmHandler, Query, Timeout) ->
    epmRpc(EpmSrv, {'$epmCall', EpmHandler, Query}, Timeout).
 
 send(EpmSrv, EpmHandler, Msg) ->
-   epmRequest(EpmSrv, {'$gen_info', EpmHandler, Msg}).
+   epmRequest(EpmSrv, {'$epm_info', EpmHandler, Msg}).
 
 -spec send_request(serverRef(), epmHandler(), term()) -> requestId().
 send_request(EpmSrv, EpmHandler, Query) ->
-   gen:send_request(EpmSrv, '$gen_call', {'$epmCall', EpmHandler, Query}).
+   gen:send_request(EpmSrv, '$epm_call', {'$epmCall', EpmHandler, Query}).
 
--spec wait_response(RequestId :: requestId(), timeout()) ->
-   {reply, Reply :: term()} | 'timeout' | {error, {Reason :: term(), serverRef()}}.
+-spec wait_response(RequestId :: requestId(), timeout()) -> {reply, Reply :: term()} | 'timeout' | {error, {Reason :: term(), serverRef()}}.
 wait_response(RequestId, Timeout) ->
    case gen:wait_response(RequestId, Timeout) of
+      {reply, {error, _} = Err} -> Err;
+      Return -> Return
+   end.
+
+-spec receive_response(RequestId::requestId(), timeout()) -> {reply, Reply::term()} | 'timeout' | {error, {Reason::term(), serverRef()}}.
+receive_response(RequestId, Timeout) ->
+   case gen:receive_response(RequestId, Timeout) of
       {reply, {error, _} = Err} -> Err;
       Return -> Return
    end.
@@ -284,7 +291,7 @@ check_response(Msg, RequestId) ->
    end.
 
 epmRpc(EpmSrv, Cmd) ->
-   try gen:call(EpmSrv, '$gen_call', Cmd, infinity) of
+   try gen:call(EpmSrv, '$epm_call', Cmd, infinity) of
       {ok, Reply} ->
          Reply
    catch Class:Reason ->
@@ -292,7 +299,7 @@ epmRpc(EpmSrv, Cmd) ->
    end.
 
 epmRpc(EpmSrv, Cmd, Timeout) ->
-   try gen:call(EpmSrv, '$gen_call', Cmd, Timeout) of
+   try gen:call(EpmSrv, '$epm_call', Cmd, Timeout) of
       {ok, Reply} ->
          Reply
    catch Class:Reason ->
@@ -341,7 +348,7 @@ epmCallMsg(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, From, Requ
    NewDebug = ?SYS_DEBUG(Debug, ServerName, {call, From, Request}),
    case Request of
       '$which_handlers' ->
-         reply(From, EpmHers),
+         reply(From, maps:keys(EpmHers)),
          receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, NewDebug, false);
       {'$addEpm', EpmHandler, Args} ->
          {Reply, NewEpmHers, IsHib} = doAddEpm(EpmHers, EpmHandler, Args, undefined),
@@ -395,18 +402,21 @@ handleMsg(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, Msg) ->
    NewDebug = ?SYS_DEBUG(Debug, ServerName, {in, Msg}),
    case Msg of
       {'EXIT', From, Reason} ->
-         NewEpmHers = epmStopOne(EpmHers, From, Reason),
+         NewEpmHers = epmStopOne(From, EpmHers, Reason),
          receiveIng(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, false);
       {_From, Tag, stop} ->
-         try terminate_server(normal, Parent, EpmHers, ServerName)
+         try terminate_server(normal, Parent, ServerName, EpmHers)
          after
             reply(Tag, ok)
          end;
       {_From, Tag, get_modules} ->
          reply(Tag, get_modules(EpmHers)),
          receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, NewDebug, false);
+      {_From, Tag, which_handlers} ->
+         reply(Tag, maps:keys(EpmHers)),
+         receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, NewDebug, false);
       _ ->
-         {NewEpmHers, IsHib} = doNotify(EpmHers, handleInfo, EpmHers, false),
+         {NewEpmHers, IsHib} = doNotify(EpmHers, handleInfo, Msg, false),
          loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib)
    end.
 
@@ -435,8 +445,8 @@ doAddEpm(EpmHers, {Module, _SubId} = EpmId, Args, EpmSup) ->
          catch
             throw:Ret ->
                addNewEpm(Ret, EpmHers, Module, EpmId, EpmSup);
-            C:R ->
-               {{error, {C, R, ?STACKTRACE()}}, EpmHers, false}
+            C:R:S ->
+               {{error, {C, R, S}}, EpmHers, false}
          end
    end;
 doAddEpm(EpmHers, Module, Args, EpmSup) ->
@@ -450,8 +460,8 @@ doAddEpm(EpmHers, Module, Args, EpmSup) ->
          catch
             throw:Ret ->
                addNewEpm(Ret, EpmHers, Module, Module, EpmSup);
-            C:R ->
-               {{error, {C, R, ?STACKTRACE()}}, EpmHers, false}
+            C:R:S ->
+               {{error, {C, R, S}}, EpmHers, false}
          end
    end.
 
@@ -514,9 +524,9 @@ doEpmHandle(EpmHers, EpmId, Func, Event, From) ->
          catch
             throw:Ret ->
                handleEpmCR(Ret, EpmHers, EpmId, EpmHer, Event, From);
-            C:R ->
-               epmTerminate(EpmHer, {error, {C, R, ?STACKTRACE()}}, Event, crash),
-               maps:remove(EpmId, EpmHer)
+            C:R:S ->
+               epmTerminate(EpmHer, {error, {C, R, S}}, Event, crash),
+               maps:remove(EpmId, EpmHers)
          end;
       _ ->
          try_reply(From, {error, bad_module}),
@@ -672,6 +682,10 @@ epmTerminate(#epmHer{epmM = EpmM, epmS = State} = EpmHer, Args, LastIn, Reason) 
          ok
    end.
 
+-spec reply(From :: from(), Reply :: term()) -> ok.
+reply({_To, [alias|Alias] = Tag}, Reply) ->
+   Alias ! {Tag, Reply},
+   ok;
 reply({To, Ref}, Msg) ->
    try To ! {Ref, Msg},
    ok
@@ -681,6 +695,9 @@ reply({To, Ref}, Msg) ->
 
 try_reply(false, _Msg) ->
    ignore;
+try_reply({_To, [alias|Alias] = Tag}, Reply) ->
+   Alias ! {Tag, Reply},
+   ok;
 try_reply({To, Ref}, Msg) ->
    try To ! {Ref, Msg},
    ok
