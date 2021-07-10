@@ -697,9 +697,8 @@ receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState,
             {system, PidFrom, Request} ->
                %% 不返回但尾递归调用 system_continue/3
                sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib}, IsHib);
-
             {'EXIT', Parent, Reason} ->
-               terminate(Reason, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, CurState, Msg);
+               terminate(exit, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, CurState, Msg);
             _ ->
                matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg)
          end

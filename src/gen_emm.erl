@@ -434,34 +434,37 @@ addNewEpm(InitRet, EpmHers, Module, EpmId, EpmSup) ->
          {Other, EpmHers, false}
    end.
 
-doAddEpm(EpmHers, {Module, _SubId} = EpmId, Args, EpmSup) ->
-   case EpmHers of
-      #{EpmId := _EpmHer} ->
-         {{error, existed}, EpmHers, false};
+doAddEpm(EpmHers, EpmId, Args, EpmSup) ->
+   case EpmId of
+      {Module, _SubId} ->
+         case EpmHers of
+            #{EpmId := _EpmHer} ->
+               {{error, existed}, EpmHers, false};
+            _ ->
+               try Module:init(Args) of
+                  Result ->
+                     addNewEpm(Result, EpmHers, Module, EpmId, EpmSup)
+               catch
+                  throw:Ret ->
+                     addNewEpm(Ret, EpmHers, Module, EpmId, EpmSup);
+                  C:R:S ->
+                     {{error, {C, R, S}}, EpmHers, false}
+               end
+         end;
       _ ->
-         try Module:init(Args) of
-            Result ->
-               addNewEpm(Result, EpmHers, Module, EpmId, EpmSup)
-         catch
-            throw:Ret ->
-               addNewEpm(Ret, EpmHers, Module, EpmId, EpmSup);
-            C:R:S ->
-               {{error, {C, R, S}}, EpmHers, false}
-         end
-   end;
-doAddEpm(EpmHers, Module, Args, EpmSup) ->
-   case EpmHers of
-      #{Module := _EpmHer} ->
-         {{error, existed}, EpmHers, false};
-      _ ->
-         try Module:init(Args) of
-            Result ->
-               addNewEpm(Result, EpmHers, Module, Module, EpmSup)
-         catch
-            throw:Ret ->
-               addNewEpm(Ret, EpmHers, Module, Module, EpmSup);
-            C:R:S ->
-               {{error, {C, R, S}}, EpmHers, false}
+         case EpmHers of
+            #{EpmId := _EpmHer} ->
+               {{error, existed}, EpmHers, false};
+            _ ->
+               try EpmId:init(Args) of
+                  Result ->
+                     addNewEpm(Result, EpmHers, EpmId, EpmId, EpmSup)
+               catch
+                  throw:Ret ->
+                     addNewEpm(Ret, EpmHers, EpmId, EpmId, EpmSup);
+                  C:R:S ->
+                     {{error, {C, R, S}}, EpmHers, false}
+               end
          end
    end.
 
