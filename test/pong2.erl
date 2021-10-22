@@ -13,8 +13,8 @@ init(_Args) ->
 handleCall(ping, _State, _From) ->
    {reply, pong}.
 
-handleCast(_Msg, State) ->
-   {noreply, State}.
+handleCast(_Msg, _State) ->
+   kpS.
 
-handleInfo(_Msg, State) ->
-   {noreply, State}.
+handleInfo(_Msg, _State) ->
+   kpS.

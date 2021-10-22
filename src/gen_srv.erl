@@ -239,9 +239,9 @@ init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
 %%-----------------------------------------------------------------
 %% enter_loop(Module, Options, State, <ServerName>, <TimeOut>) ->_
 %%
-%% Description: Makes an existing process into a gen_server.
-%%              The calling process will enter the gen_server receive
-%%              loop and become a gen_server process.
+%% Description: Makes an existing process into a gen_srv.
+%%              The calling process will enter the gen_srv receive
+%%              loop and become a gen_srv process.
 %%              The process *must* have been started using one of the
 %%              start functions in proc_lib, see proc_lib(3).
 %%              The user is responsible for any initialization of the
@@ -412,6 +412,15 @@ multi_call(Nodes, Name, Request, infinity) ->
 multi_call(Nodes, Name, Request, Timeout) when is_list(Nodes), is_atom(Name), is_integer(Timeout), Timeout >= 0 ->
    do_multi_call(Nodes, Name, Request, Timeout).
 
+do_multi_call([Node], Name, Req, infinity) when Node =:= node() ->
+   % Special case when multi_call is used with local node only.
+   % In that case we can leverage the benefit of recv_mark optimisation
+   % existing in simple gen:call.
+   try gen:call(Name, '$gen_call', Req, infinity) of
+      {ok, Res} -> {[{Node, Res}],[]}
+   catch exit:_ ->
+      {[], [Node]}
+   end;
 do_multi_call(Nodes, Name, Request, infinity) ->
    Tag = make_ref(),
    Monitors = send_nodes(Nodes, Name, Tag, Request),
@@ -606,7 +615,7 @@ rec_nodes(Tag, [N | Tail], Name, Badnodes, Replies, Time, TimerId) ->
          %% Collect all replies that already have arrived
          rec_nodes_rest(Tag, Tail, Name, [N | Badnodes], Replies)
    after Time ->
-      case rpc:call(N, erlang, whereis, [Name]) of
+      case erpc:call(N, erlang, whereis, [Name]) of
          Pid when is_pid(Pid) -> % It exists try again.
             rec_nodes(Tag, [N | Tail], Name, Badnodes,
                Replies, infinity, TimerId);
@@ -976,7 +985,7 @@ error_info(_Reason, application_controller, _From, _Msg, _Mod, _State, _Debug) -
    ok;
 error_info(Reason, Name, From, Msg, Module, Debug, State) ->
    Log = sys:get_log(Debug),
-   ?LOG_ERROR(#{label => {gen_server, terminate},
+   ?LOG_ERROR(#{label => {gen_srv, terminate},
       name => Name,
       last_message => Msg,
       state => format_status(terminate, Module, get(), State),
@@ -985,8 +994,8 @@ error_info(Reason, Name, From, Msg, Module, Debug, State) ->
       client_info => client_stacktrace(From)},
       #{
          domain => [otp],
-         report_cb => fun gen_server:format_log/2,
-         error_logger => #{tag => error, report_cb => fun gen_server:format_log/1}
+         report_cb => fun gen_srv:format_log/2,
+         error_logger => #{tag => error, report_cb => fun gen_srv:format_log/1}
       }),
    ok.
 
@@ -1022,7 +1031,7 @@ format_log(Report) ->
 
 limit_report(Report, unlimited) ->
    Report;
-limit_report(#{label := {gen_server, terminate},
+limit_report(#{label := {gen_srv, terminate},
    last_message := Msg,
    state := State,
    log := Log,
@@ -1036,7 +1045,7 @@ limit_report(#{label := {gen_server, terminate},
       reason => io_lib:limit_term(Reason, Depth),
       client_info => limit_client_report(Client, Depth)
    };
-limit_report(#{label := {gen_server, no_handle_info},
+limit_report(#{label := {gen_srv, no_handle_info},
    message := Msg} = Report, Depth) ->
    Report#{message => io_lib:limit_term(Msg, Depth)}.
 
@@ -1063,7 +1072,7 @@ format_log(Report, FormatOpts0) ->
    {Format, Args} = format_log_single(Report, FormatOpts),
    io_lib:format(Format, Args, IoOpts).
 
-format_log_single(#{label := {gen_server, terminate},
+format_log_single(#{label := {gen_srv, terminate},
    name := Name,
    last_message := Msg,
    state := State,
@@ -1086,7 +1095,7 @@ format_log_single(#{label := {gen_server, terminate},
       end,
    {Format1 ++ ServerLogFormat ++ ClientLogFormat,
          Args1 ++ ServerLogArgs ++ ClientLogArgs};
-format_log_single(#{label := {gen_server, no_handle_info},
+format_log_single(#{label := {gen_srv, no_handle_info},
    module := Module,
    message := Msg},
    #{single_line := true, depth := Depth} = FormatOpts) ->
@@ -1104,7 +1113,7 @@ format_log_single(#{label := {gen_server, no_handle_info},
 format_log_single(Report, FormatOpts) ->
    format_log_multi(Report, FormatOpts).
 
-format_log_multi(#{label := {gen_server, terminate},
+format_log_multi(#{label := {gen_srv, terminate},
    name := Name,
    last_message := Msg,
    state := State,
@@ -1130,11 +1139,7 @@ format_log_multi(#{label := {gen_server, terminate},
    Args =
       case Depth of
          unlimited ->
-            [Name, Msg, State, Reason1] ++
-               case Log of
-                  [] -> [];
-                  _ -> Log
-               end ++ ClientArgs;
+            [Name, Msg, State, Reason1] ++ Log ++ ClientArgs;
          _ ->
             [Name, Depth, Msg, Depth, State, Depth, Reason1, Depth] ++
                case Log of
@@ -1143,7 +1148,7 @@ format_log_multi(#{label := {gen_server, terminate},
                end ++ ClientArgs
       end,
    {Format, Args};
-format_log_multi(#{label := {gen_server, no_handle_info},
+format_log_multi(#{label := {gen_srv, no_handle_info},
    module := Module,
    message := Msg},
    #{depth := Depth} = FormatOpts) ->

@@ -574,6 +574,15 @@ multi_call(Nodes, Name, Request, infinity) ->
 multi_call(Nodes, Name, Request, Timeout) when is_list(Nodes), is_atom(Name), is_integer(Timeout), Timeout >= 0 ->
    do_multi_call(Nodes, Name, Request, Timeout).
 
+do_multi_call([Node], Name, Req, infinity) when Node =:= node() ->
+   % Special case when multi_call is used with local node only.
+   % In that case we can leverage the benefit of recv_mark optimisation
+   % existing in simple gen:call.
+   try gen:call(Name, '$gen_call', Req, infinity) of
+      {ok, Res} -> {[{Node, Res}],[]}
+   catch exit:_ ->
+      {[], [Node]}
+   end;
 do_multi_call(Nodes, Name, Request, infinity) ->
    Tag = make_ref(),
    Monitors = send_nodes(Nodes, Name, Tag, Request),
@@ -740,7 +749,7 @@ rec_nodes(Tag, [N | Tail], Name, BadNodes, Replies, Time, TimerId) ->
          monitor_node(N, false),
          rec_nodes_rest(Tag, Tail, Name, [N | BadNodes], Replies)
    after Time ->
-      case rpc:call(N, erlang, whereis, [Name]) of
+      case erpc:call(N, erlang, whereis, [Name]) of
          Pid when is_pid(Pid) ->
             rec_nodes(Tag, [N | Tail], Name, BadNodes,
                Replies, infinity, TimerId);
