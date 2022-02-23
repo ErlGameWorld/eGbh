@@ -5,6 +5,9 @@
 
 -include_lib("kernel/include/logger.hrl").
 
+-import(maps, [iterator/1, next/1]).
+-import(gen_call, [gcall/3, gcall/4, greply/2]).
+
 -export([
    %% API for gen_server or gen_statem behaviour
    start/3, start/4, start_link/3, start_link/4
@@ -81,7 +84,7 @@
 %%%==========================================================================
 %%% Interface functions.
 %%%==========================================================================
-%% gen:call 发送消息来源进程格式类型
+%% gcall 发送消息来源进程格式类型
 -type from() :: {To :: pid(), Tag :: term()}.
 -type requestId() :: term().
 
@@ -504,63 +507,20 @@ format_status(Opt, [PDict, SysStatus, Parent, Debug, {Parent, Name, Module, Hibe
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  start  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 -spec call(ServerRef :: serverRef(), Request :: term()) -> Reply :: term().
 call(ServerRef, Request) ->
-   try gen:call(ServerRef, '$gen_call', Request) of
+   try gcall(ServerRef, '$gen_call', Request) of
       {ok, Reply} ->
          Reply
    catch Class:Reason ->
       erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, ?STACKTRACE())
    end.
 
--spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout() |{'clean_timeout', T :: timeout()} | {'dirty_timeout', T :: timeout()}) -> Reply :: term().
-call(ServerRef, Request, infinity) ->
-   try gen:call(ServerRef, '$gen_call', Request, infinity) of
-      {ok, Reply} ->
-         Reply
-   catch Class:Reason ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, ?STACKTRACE())
-   end;
-call(ServerRef, Request, {dirty_timeout, T} = Timeout) ->
-   try gen:call(ServerRef, '$gen_call', Request, T) of
-      {ok, Reply} ->
-         Reply
-   catch Class:Reason ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, ?STACKTRACE())
-   end;
-call(ServerRef, Request, {clean_timeout, T} = Timeout) ->
-   callClean(ServerRef, Request, Timeout, T);
-call(ServerRef, Request, {_, _} = Timeout) ->
-   erlang:error(badarg, [ServerRef, Request, Timeout]);
+-spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout()) -> Reply :: term().
 call(ServerRef, Request, Timeout) ->
-   callClean(ServerRef, Request, Timeout, Timeout).
-
-callClean(ServerRef, Request, Timeout, T) ->
-   %% 通过代理过程呼叫服务器以躲避任何较晚的答复
-   Ref = make_ref(),
-   Self = self(),
-   Pid = spawn(
-      fun() ->
-         Self !
-            try gen:call(ServerRef, '$gen_call', Request, T) of
-               Result ->
-                  {Ref, Result}
-            catch Class:Reason ->
-               {Ref, Class, Reason, ?STACKTRACE()}
-            end
-      end),
-   Mref = monitor(process, Pid),
-   receive
-      {Ref, Result} ->
-         demonitor(Mref, [flush]),
-         case Result of
-            {ok, Reply} ->
-               Reply
-         end;
-      {Ref, Class, Reason, Stacktrace} ->
-         demonitor(Mref, [flush]),
-         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace);
-      {'DOWN', Mref, _, _, Reason} ->
-         %% 从理论上讲，有可能在try-of和！之间杀死代理进程。因此，在这种情况下
-         exit(Reason)
+   try gcall(ServerRef, '$gen_call', Request, Timeout) of
+      {ok, Reply} ->
+         Reply
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, ?STACKTRACE())
    end.
 
 multi_call(Name, Request) when is_atom(Name) ->
@@ -577,9 +537,9 @@ multi_call(Nodes, Name, Request, Timeout) when is_list(Nodes), is_atom(Name), is
 do_multi_call([Node], Name, Req, infinity) when Node =:= node() ->
    % Special case when multi_call is used with local node only.
    % In that case we can leverage the benefit of recv_mark optimisation
-   % existing in simple gen:call.
-   try gen:call(Name, '$gen_call', Req, infinity) of
-      {ok, Res} -> {[{Node, Res}],[]}
+   % existing in simple gcall.
+   try gcall(Name, '$gen_call', Req, infinity) of
+      {ok, Res} -> {[{Node, Res}], []}
    catch exit:_ ->
       {[], [Node]}
    end;
@@ -694,11 +654,11 @@ wait_response(RequestId) ->
 wait_response(RequestId, Timeout) ->
    gen:wait_response(RequestId, Timeout).
 
--spec receive_response(RequestId::serverRef()) -> {reply, Reply::term()} | {error, {term(), serverRef()}}.
+-spec receive_response(RequestId :: serverRef()) -> {reply, Reply :: term()} | {error, {term(), serverRef()}}.
 receive_response(RequestId) ->
    gen:receive_response(RequestId, infinity).
 
--spec receive_response(RequestId::requestId(), timeout()) -> {reply, Reply::term()} | 'timeout' | {error, {term(), serverRef()}}.
+-spec receive_response(RequestId :: requestId(), timeout()) -> {reply, Reply :: term()} | 'timeout' | {error, {term(), serverRef()}}.
 receive_response(RequestId, Timeout) ->
    gen:receive_response(RequestId, Timeout).
 
@@ -825,36 +785,18 @@ reply({reply, {To, Tag}, Reply}) ->
       ok
    end;
 reply(Replies) when is_list(Replies) ->
-   [
-      begin
-         try To ! {Tag, Reply},
-         ok
-         catch _:_ ->
-            ok
-         end
-      end || {reply, {To, Tag}, Reply} <- Replies
-   ],
+   [greply(From, Reply) || {reply, From, Reply} <- Replies],
    ok.
 
+-compile({inline, [reply/2]}).
 -spec reply(From :: from(), Reply :: term()) -> ok.
-reply({_To, [alias|Alias] = Tag}, Reply) ->
-   Alias ! {Tag, Reply},
-   ok;
-reply({To, Tag}, Reply) ->
-   try To ! {Tag, Reply},
-   ok
-   catch _:_ ->
-      ok
-   end.
+reply(From, Reply) ->
+   greply(From, Reply).
 
 try_reply(false, _Msg) ->
    ignore;
-try_reply({To, Ref}, Msg) ->
-   try To ! {Ref, Msg},
-   ok
-   catch _:_ ->
-      ok
-   end.
+try_reply(From, Reply) ->
+   greply(From, Reply).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% API helpers  end  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% gen_event  start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -881,7 +823,7 @@ info_notify(EpmSrv, Event) ->
    epmRequest(EpmSrv, {'$epm_info', '$infoNotify', Event}).
 
 epmRpc(EpmSrv, Cmd) ->
-   try gen:call(EpmSrv, '$epm_call', Cmd, infinity) of
+   try gcall(EpmSrv, '$epm_call', Cmd, infinity) of
       {ok, Reply} ->
          Reply
    catch Class:Reason ->
@@ -889,7 +831,7 @@ epmRpc(EpmSrv, Cmd) ->
    end.
 
 epmRpc(EpmSrv, Cmd, Timeout) ->
-   try gen:call(EpmSrv, '$epm_call', Cmd, Timeout) of
+   try gcall(EpmSrv, '$epm_call', Cmd, Timeout) of
       {ok, Reply} ->
          Reply
    catch Class:Reason ->
@@ -1012,10 +954,10 @@ doSwapSupEpm(EpmHers, EpmId1, Args1, EpmMId, Args2, EpmSup) ->
    end.
 
 doNotify(EpmHers, Func, Event, _Form) ->
-   allNotify(maps:iterator(EpmHers), Func, Event, false, EpmHers, false).
+   allNotify(iterator(EpmHers), Func, Event, false, EpmHers, false).
 
 allNotify(Iterator, Func, Event, From, TemEpmHers, IsHib) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {K, _V, NextIterator} ->
          {NewEpmHers, NewIsHib} = doEpmHandle(TemEpmHers, K, Func, Event, From),
          allNotify(NextIterator, Func, Event, From, NewEpmHers, IsHib orelse NewIsHib);
@@ -1127,10 +1069,10 @@ epm_log(#{label := {gen_ipc, no_handle_info}, module := Module, message := Msg})
    "** Unhandled message: ~tp~n", [Module, Msg]}.
 
 epmStopAll(EpmHers) ->
-   allStop(maps:iterator(EpmHers)).
+   allStop(iterator(EpmHers)).
 
 allStop(Iterator) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {_K, V, NextIterator} ->
          epmTerminate(V, stop, 'receive', shutdown),
          case element(#epmHer.epmSup, V) of
@@ -1145,10 +1087,10 @@ allStop(Iterator) ->
    end.
 
 epmStopOne(ExitEmpSup, EpmHers) ->
-   forStopOne(maps:iterator(EpmHers), ExitEmpSup, EpmHers).
+   forStopOne(iterator(EpmHers), ExitEmpSup, EpmHers).
 
 forStopOne(Iterator, ExitEmpSup, TemEpmHers) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {K, V, NextIterator} ->
          case element(#epmHer.epmSup, V) =:= ExitEmpSup of
             true ->
@@ -1315,7 +1257,7 @@ matchEpmInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, P
          {NewEpmHers, IsHib} = doNotify(EpmHers, handleEvent, Event, false),
          startEpmCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, handleEpmEvent, Event, IsHib);
       EpmHandler ->
-         {NewEpmHers, IsHib} = doEpmHandle(EpmHers, EpmHandler, handleInfo, Event,  false),
+         {NewEpmHers, IsHib} = doEpmHandle(EpmHers, EpmHandler, handleInfo, Event, false),
          startEpmCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, handleEpmInfo, Event, IsHib)
    end.
 
@@ -1407,10 +1349,10 @@ handleEpmCR(Result, EpmHers, #epmHer{epmId = EpmId} = EpmHer, Event, From) ->
    case Result of
       kpS ->
          {EpmHers, false};
-      {ok, NewEpmS} ->
+      {noreply, NewEpmS} ->
          MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
          {EpmHers#{EpmId := MewEpmHer}, false};
-      {ok, NewEpmS, hibernate} ->
+      {noreply, NewEpmS, hibernate} ->
          MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
          {EpmHers#{EpmId := MewEpmHer}, true};
       {swapEpm, NewEpmS, Args1, EpmMId, Args2} ->
@@ -2039,11 +1981,11 @@ cancelTimer(TimeoutType, TimerRef, Timers) ->
 
 %% Return a list of all pending timeouts
 listTimeouts(Timers) ->
-   {maps:size(Timers), allTimer(maps:iterator(Timers), [])}.
+   {maps:size(Timers), allTimer(iterator(Timers), [])}.
 
 allTimer(Iterator, Acc) ->
-   case maps:next(Iterator) of
-      {TimeoutType, {_TimerRef, TimeoutMsg}, NextIterator}  ->
+   case next(Iterator) of
+      {TimeoutType, {_TimerRef, TimeoutMsg}, NextIterator} ->
          allTimer(NextIterator, [{TimeoutType, TimeoutMsg} | Acc]);
       none ->
          Acc

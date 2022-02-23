@@ -6,6 +6,7 @@
 -include_lib("kernel/include/logger.hrl").
 
 -import(maps, [iterator/1, next/1]).
+-import(gen_call, [gcall/3, gcall/4, greply/2]).
 
 -export([
    %% API for gen_emm
@@ -122,8 +123,8 @@
 -callback handleEvent(Event :: term(), State :: term()) ->
    kpS |
    removeEpm |
-   {ok, NewState :: term()} |
-   {ok, NewState :: term(), hibernate} |
+   {noreply, NewState :: term()} |
+   {noreply, NewState :: term(), hibernate} |
    {swapEpm, NewState :: term(), Args1 :: term(), NewHandler :: epmHandler(), Args2 :: term()}.
 
 -callback handleCall(Request :: term(), State :: term()) ->
@@ -136,8 +137,8 @@
 -callback handleInfo(Info :: term(), State :: term()) ->
    kpS |
    removeEpm |
-   {ok, NewState :: term()} |
-   {ok, NewState :: term(), hibernate} |
+   {noreply, NewState :: term()} |
+   {noreply, NewState :: term(), hibernate} |
    {swapEpm, NewState :: term(), Args1 :: term(), NewHandler :: epmHandler(), Args2 :: term()}.
 
 -callback terminate(Args :: terminateArgs(), State :: term()) ->
@@ -275,7 +276,7 @@ wait_response(RequestId, Timeout) ->
       Return -> Return
    end.
 
--spec receive_response(RequestId::requestId(), timeout()) -> {reply, Reply::term()} | 'timeout' | {error, {Reason::term(), serverRef()}}.
+-spec receive_response(RequestId :: requestId(), timeout()) -> {reply, Reply :: term()} | 'timeout' | {error, {Reason :: term(), serverRef()}}.
 receive_response(RequestId, Timeout) ->
    case gen:receive_response(RequestId, Timeout) of
       {reply, {error, _} = Err} -> Err;
@@ -291,7 +292,7 @@ check_response(Msg, RequestId) ->
    end.
 
 epmRpc(EpmSrv, Cmd) ->
-   try gen:call(EpmSrv, '$epm_call', Cmd, infinity) of
+   try gcall(EpmSrv, '$epm_call', Cmd, infinity) of
       {ok, Reply} ->
          Reply
    catch Class:Reason ->
@@ -299,7 +300,7 @@ epmRpc(EpmSrv, Cmd) ->
    end.
 
 epmRpc(EpmSrv, Cmd, Timeout) ->
-   try gen:call(EpmSrv, '$epm_call', Cmd, Timeout) of
+   try gcall(EpmSrv, '$epm_call', Cmd, Timeout) of
       {ok, Reply} ->
          Reply
    catch Class:Reason ->
@@ -503,10 +504,10 @@ doSwapSupEpm(EpmHers, EpmId1, Args1, EpmMId, Args2, EpmSup) ->
    end.
 
 doNotify(EpmHers, Func, Event, _Form) ->
-   allNotify(maps:iterator(EpmHers), Func, Event, false, EpmHers, false).
+   allNotify(iterator(EpmHers), Func, Event, false, EpmHers, false).
 
 allNotify(Iterator, Func, Event, From, TemEpmHers, IsHib) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {K, _V, NextIterator} ->
          case doEpmHandle(TemEpmHers, K, Func, Event, From) of
             {NewEpmHers, NewIsHib} ->
@@ -550,10 +551,10 @@ handleEpmCR(Result, EpmHers, EpmId, EpmHer, Event, From) ->
    case Result of
       kpS ->
          EpmHers;
-      {ok, NewEpmS} ->
+      {noreply, NewEpmS} ->
          MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
          EpmHers#{EpmId := MewEpmHer};
-      {ok, NewEpmS, hibernate} ->
+      {noreply, NewEpmS, hibernate} ->
          MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
          {EpmHers#{EpmId := MewEpmHer}, true};
       {swapEpm, NewEpmS, Args1, EpmMId, Args2} ->
@@ -600,7 +601,7 @@ handleEpmCR(Result, EpmHers, EpmId, EpmHer, Event, From) ->
          MewEpmHer = setelement(#epmHer.epmS, EpmHer, NewEpmS),
          {EpmHers#{EpmId := MewEpmHer}, true};
       Other ->
-         epmTerminate(EpmHer, {error, Other}, Event, crash),
+         epmTerminate(EpmHer, {error, {bad_ret, Other}}, Event, crash),
          maps:remove(EpmId, EpmHers)
    end.
 
@@ -636,14 +637,14 @@ report_error(#epmHer{epmId = EpmId, epmM = EpmM}, Reason, State, LastIn) ->
       #{
          domain => [otp],
          report_cb => fun gen_emm:format_log/2,
-         error_logger => #{tag => error, report_cb => fun gen_event:format_log/1}
+         error_logger => #{tag => error, report_cb => fun gen_emm:format_log/1}
       }).
 
 epmStopAll(EpmHers) ->
-   forStopAll(maps:iterator(EpmHers)).
+   forStopAll(iterator(EpmHers)).
 
 forStopAll(Iterator) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {_K, V, NextIterator} ->
          epmTerminate(V, stop, stop, shutdown),
          case element(#epmHer.epmSup, V) of
@@ -658,10 +659,10 @@ forStopAll(Iterator) ->
    end.
 
 epmStopOne(ExitEmpSup, EpmHers, Reason) ->
-   forStopOne(maps:iterator(EpmHers), ExitEmpSup, Reason, EpmHers).
+   forStopOne(iterator(EpmHers), ExitEmpSup, Reason, EpmHers).
 
 forStopOne(Iterator, ExitEmpSup, Reason, TemEpmHers) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {K, V, NextIterator} ->
          case element(#epmHer.epmSup, V) =:= ExitEmpSup of
             true ->
@@ -685,28 +686,15 @@ epmTerminate(#epmHer{epmM = EpmM, epmS = State} = EpmHer, Args, LastIn, Reason) 
          ok
    end.
 
+-compile({inline, [reply/2]}).
 -spec reply(From :: from(), Reply :: term()) -> ok.
-reply({_To, [alias|Alias] = Tag}, Reply) ->
-   Alias ! {Tag, Reply},
-   ok;
-reply({To, Ref}, Msg) ->
-   try To ! {Ref, Msg},
-   ok
-   catch _:_ ->
-      ok
-   end.
+reply(From, Reply) ->
+   greply(From, Reply).
 
 try_reply(false, _Msg) ->
    ignore;
-try_reply({_To, [alias|Alias] = Tag}, Reply) ->
-   Alias ! {Tag, Reply},
-   ok;
-try_reply({To, Ref}, Msg) ->
-   try To ! {Ref, Msg},
-   ok
-   catch _:_ ->
-      ok
-   end.
+try_reply(From, Reply) ->
+   greply(From, Reply).
 
 terminate_server(Reason, _Parent, _ServerName, EpmHers) ->
    epmStopAll(EpmHers),
@@ -727,11 +715,11 @@ system_terminate(Reason, Parent, _Debug, {ServerName, _HibernateAfterTimeout, Ep
 %% which module should be changed.
 %%-----------------------------------------------------------------
 system_code_change({ServerName, HibernateAfterTimeout, EpmHers, IsHib}, Module, OldVsn, Extra) ->
-   NewEpmHers = forCodeChange(maps:iterator(EpmHers), Module, OldVsn, Extra, EpmHers),
+   NewEpmHers = forCodeChange(iterator(EpmHers), Module, OldVsn, Extra, EpmHers),
    {ok, {ServerName, HibernateAfterTimeout, NewEpmHers, IsHib}}.
 
 forCodeChange(Iterator, CModule, OldVsn, Extra, TemEpmHers) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {K, #epmHer{epmM = Module, epmS = EpmS} = V, NextIterator} when Module =:= CModule ->
          {ok, NewEpmS} = Module:code_change(OldVsn, EpmS, Extra),
          forCodeChange(NextIterator, CModule, OldVsn, Extra, TemEpmHers#{K := V#epmHer{epmS = NewEpmS}});
@@ -742,10 +730,10 @@ forCodeChange(Iterator, CModule, OldVsn, Extra, TemEpmHers) ->
    end.
 
 system_get_state({_ServerName, _HibernateAfterTimeout, EpmHers, _Hib}) ->
-   {ok, forGetState(maps:iterator(EpmHers), [])}.
+   {ok, forGetState(iterator(EpmHers), [])}.
 
 forGetState(Iterator, Acc) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {_K, #epmHer{epmId = EpmId, epmM = Module, epmS = EpmS}, NextIterator} ->
          forGetState(NextIterator, [{Module, EpmId, EpmS} | Acc]);
       _ ->
@@ -753,11 +741,11 @@ forGetState(Iterator, Acc) ->
    end.
 
 system_replace_state(StateFun, {ServerName, HibernateAfterTimeout, EpmHers, IsHib}) ->
-   {NewEpmHers, NStates} = forReplaceState(maps:iterator(EpmHers), StateFun, EpmHers, []),
+   {NewEpmHers, NStates} = forReplaceState(iterator(EpmHers), StateFun, EpmHers, []),
    {ok, NStates, {ServerName, HibernateAfterTimeout, NewEpmHers, IsHib}}.
 
 forReplaceState(Iterator, StateFun, TemEpmHers, NStates) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {K, #epmHer{epmId = EpmId, epmM = Module, epmS = EpmS} = V, NextIterator} ->
          NState = {_, _, NewEpmS} = StateFun({Module, EpmId, EpmS}),
          forReplaceState(NextIterator, StateFun, TemEpmHers#{K := V#epmHer{epmS = NewEpmS}}, [NState | NStates]);
@@ -942,10 +930,10 @@ mod(_) -> "t".
 %% Message from the release_handler.
 %% The list of modules got to be a set, i.e. no duplicate elements!
 get_modules(EpmHers) ->
-   allMods(maps:iterator(EpmHers), []).
+   allMods(iterator(EpmHers), []).
 
 allMods(Iterator, Acc) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {_K, V, NextIterator} ->
          allMods(NextIterator, [element(#epmHer.epmM, V) | Acc]);
       _ ->
@@ -958,11 +946,11 @@ allMods(Iterator, Acc) ->
 format_status(Opt, StatusData) ->
    [PDict, SysState, Parent, _Debug, {ServerName, _HibernateAfterTimeout, EpmHers, _IsHib}] = StatusData,
    Header = gen:format_status_header("Status for gen_emm handler", ServerName),
-   FmtMSL = allStateStatus(maps:iterator(EpmHers), Opt, PDict, []),
+   FmtMSL = allStateStatus(iterator(EpmHers), Opt, PDict, []),
    [{header, Header}, {data, [{"Status", SysState}, {"Parent", Parent}]}, {items, {"Installed handlers", FmtMSL}}].
 
 allStateStatus(Iterator, Opt, PDict, EpmHers) ->
-   case maps:next(Iterator) of
+   case next(Iterator) of
       {_K, #epmHer{epmM = Module, epmS = EpmS} = V, NextIterator} ->
          NewEpmS = format_status(Opt, Module, PDict, EpmS),
          allStateStatus(NextIterator, Opt, PDict, [V#epmHer{epmS = NewEpmS} | EpmHers]);

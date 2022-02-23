@@ -5,12 +5,15 @@
 
 -include_lib("kernel/include/logger.hrl").
 
+-import(gen_call, [gcall/3, gcall/4, greply/2]).
+
 -export([
    %% API for gen_srv
    start/3, start/4, start_link/3, start_link/4
    , start_monitor/3, start_monitor/4
    , stop/1, stop/3
    , call/2, call/3
+   , clfn/4, clfn/5, clfs/4, clfs/5, csfn/4, csfs/4
    , send_request/2, wait_response/2, receive_response/2, check_response/2
    , cast/2, send/2, reply/1, reply/2
    , abcast/2, abcast/3
@@ -92,7 +95,7 @@
 -type timeoutOption() :: {abs, Abs :: boolean()}.
 %% -type timer() :: #{TimeoutName :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
 
-%% gen:call 发送消息来源进程格式类型
+%% gcall 发送消息来源进程格式类型
 -type from() :: {To :: pid(), Tag :: term()}.
 -type requestId() :: term().
 
@@ -331,63 +334,90 @@ system_replace_state(StateFun, {Name, Module, HibernateAfterTimeout, Timers, Cur
 %% is handled here (? Shall we do that here (or rely on timeouts) ?).
 -spec call(ServerRef :: serverRef(), Request :: term()) -> Reply :: term().
 call(ServerRef, Request) ->
-   try gen:call(ServerRef, '$gen_call', Request) of
+   try gcall(ServerRef, '$gen_call', Request) of
       {ok, Reply} ->
          Reply
    catch Class:Reason ->
       erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, ?STACKTRACE())
    end.
 
--spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout() |{'clean_timeout', T :: timeout()} | {'dirty_timeout', T :: timeout()}) -> Reply :: term().
-call(ServerRef, Request, infinity) ->
-   try gen:call(ServerRef, '$gen_call', Request, infinity) of
-      {ok, Reply} ->
-         Reply
-   catch Class:Reason ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, infinity]}}, ?STACKTRACE())
-   end;
-call(ServerRef, Request, {dirty_timeout, T} = Timeout) ->
-   try gen:call(ServerRef, '$gen_call', Request, T) of
-      {ok, Reply} ->
-         Reply
-   catch Class:Reason ->
-      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, ?STACKTRACE())
-   end;
-call(ServerRef, Request, {clean_timeout, T} = Timeout) ->
-   callClean(ServerRef, Request, Timeout, T);
-call(ServerRef, Request, {_, _} = Timeout) ->
-   erlang:error(badarg, [ServerRef, Request, Timeout]);
+-spec call(ServerRef :: serverRef(), Request :: term(), Timeout :: timeout()) -> Reply :: term().
 call(ServerRef, Request, Timeout) ->
-   callClean(ServerRef, Request, Timeout, Timeout).
+   try gcall(ServerRef, '$gen_call', Request, Timeout) of
+      {ok, Reply} ->
+         Reply
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, ?STACKTRACE())
+   end.
 
-callClean(ServerRef, Request, Timeout, T) ->
-   %% 通过代理过程呼叫服务器以躲避任何较晚的答复
-   Ref = make_ref(),
-   Self = self(),
-   Pid = spawn(
-      fun() ->
-         Self !
-            try gen:call(ServerRef, '$gen_call', Request, T) of
-               Result ->
-                  {Ref, Result}
-            catch Class:Reason ->
-               {Ref, Class, Reason, ?STACKTRACE()}
-            end
-      end),
-   Mref = monitor(process, Pid),
-   receive
-      {Ref, Result} ->
-         demonitor(Mref, [flush]),
-         case Result of
-            {ok, Reply} ->
-               Reply
-         end;
-      {Ref, Class, Reason, Stacktrace} ->
-         demonitor(Mref, [flush]),
-         erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request, Timeout]}}, Stacktrace);
-      {'DOWN', Mref, _, _, Reason} ->
-         %% 从理论上讲，有可能在try-of和！之间杀死代理进程。因此，在这种情况下
-         exit(Reason)
+-spec clfn(ServerRef :: serverRef(), M :: module(), F :: atom(), A :: list()) -> ok.
+clfn(ServerRef, M, F, A) ->
+   try gcall(ServerRef, '$gen_clfn', {M, F, A}) of
+      {ok, Reply} ->
+         Reply
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, clfn, [ServerRef, {M, F, A}]}}, ?STACKTRACE())
+   end.
+
+-spec clfn(ServerRef :: serverRef(), M :: module(), F :: atom(), A :: list(), Timeout :: timeout()) -> ok.
+clfn(ServerRef, M, F, A, Timeout) ->
+   try gcall(ServerRef, '$gen_clfn', {M, F, A}, Timeout) of
+      {ok, Reply} ->
+         Reply
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, clfn, [ServerRef, {M, F, A}]}}, ?STACKTRACE())
+   end.
+
+-spec clfs(ServerRef :: serverRef(), M :: module(), F :: atom(), A :: list()) -> ok.
+clfs(ServerRef, M, F, A) ->
+   try gcall(ServerRef, '$gen_clfs', {M, F, A}) of
+      {ok, Reply} ->
+         Reply
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, clfs, [ServerRef, {M, F, A}]}}, ?STACKTRACE())
+   end.
+
+-spec clfs(ServerRef :: serverRef(), M :: module(), F :: atom(), A :: list(), Timeout :: timeout()) -> ok.
+clfs(ServerRef, M, F, A, Timeout) ->
+   try gcall(ServerRef, '$gen_clfs', {M, F, A}, Timeout) of
+      {ok, Reply} ->
+         Reply
+   catch Class:Reason ->
+      erlang:raise(Class, {Reason, {?MODULE, clfs, [ServerRef, {M, F, A}]}}, ?STACKTRACE())
+   end.
+
+-spec csfn(ServerRef :: serverRef(), M :: module(), F :: atom(), A :: list()) -> ok.
+csfn({global, Name}, M, F, A) ->
+   try global:send(Name, {'$gen_csfn', {M, F, A}}),
+   ok
+   catch _:_ -> ok
+   end;
+csfn({via, RegMod, Name}, M, F, A) ->
+   try RegMod:send(Name, {'$gen_csfn', {M, F, A}}),
+   ok
+   catch _:_ -> ok
+   end;
+csfn(Dest, M, F, A) ->
+   try erlang:send(Dest, {'$gen_csfn', {M, F, A}}),
+   ok
+   catch _:_ -> ok
+   end.
+
+-spec csfs(ServerRef :: serverRef(), M :: module(), F :: atom(), A :: list()) -> ok.
+csfs({global, Name}, M, F, A) ->
+   try global:send(Name, {'$gen_csfs', {M, F, A}}),
+   ok
+   catch _:_ -> ok
+   end;
+csfs({via, RegMod, Name}, M, F, A) ->
+   try RegMod:send(Name, {'$gen_csfs', {M, F, A}}),
+   ok
+   catch _:_ -> ok
+   end;
+csfs(Dest, M, F, A) ->
+   try erlang:send(Dest, {'$gen_csfs', {M, F, A}}),
+   ok
+   catch _:_ -> ok
    end.
 
 %%% -----------------------------------------------------------------
@@ -415,9 +445,9 @@ multi_call(Nodes, Name, Request, Timeout) when is_list(Nodes), is_atom(Name), is
 do_multi_call([Node], Name, Req, infinity) when Node =:= node() ->
    % Special case when multi_call is used with local node only.
    % In that case we can leverage the benefit of recv_mark optimisation
-   % existing in simple gen:call.
-   try gen:call(Name, '$gen_call', Req, infinity) of
-      {ok, Res} -> {[{Node, Res}],[]}
+   % existing in simple gcall.
+   try gcall(Name, '$gen_call', Req, infinity) of
+      {ok, Res} -> {[{Node, Res}], []}
    catch exit:_ ->
       {[], [Node]}
    end;
@@ -506,9 +536,6 @@ doAbcast(Nodes, Name, Msg) ->
    ],
    ok.
 
-%% -----------------------------------------------------------------
-%% Send a reply to the client.
-%% -----------------------------------------------------------------
 %% Reply from a status machine callback to whom awaits in call/2
 -spec reply([replyAction(), ...] | replyAction()) -> ok.
 reply({reply, {To, Tag}, Reply}) ->
@@ -518,27 +545,13 @@ reply({reply, {To, Tag}, Reply}) ->
       ok
    end;
 reply(Replies) when is_list(Replies) ->
-   [
-      begin
-         try To ! {Tag, Reply},
-         ok
-         catch _:_ ->
-            ok
-         end
-      end || {reply, {To, Tag}, Reply} <- Replies
-   ],
+   [greply(From, Reply) || {reply, From, Reply} <- Replies],
    ok.
 
+-compile({inline, [reply/2]}).
 -spec reply(From :: from(), Reply :: term()) -> ok.
-reply({_To, [alias|Alias] = Tag}, Reply) ->
-   Alias ! {Tag, Reply},
-   ok;
-reply({To, Tag}, Reply) ->
-   try To ! {Tag, Reply},
-   ok
-   catch _:_ ->
-      ok
-   end.
+reply(From, Reply) ->
+   greply(From, Reply).
 
 %% -----------------------------------------------------------------
 %% Send a request to a generic server and return a Key which should be
@@ -554,7 +567,7 @@ send_request(Name, Request) ->
 wait_response(RequestId, Timeout) ->
    gen:wait_response(RequestId, Timeout).
 
--spec receive_response(RequestId::requestId(), timeout()) -> {reply, Reply::term()} | 'timeout' | {error, {Reason::term(), serverRef()}}.
+-spec receive_response(RequestId :: requestId(), timeout()) -> {reply, Reply :: term()} | 'timeout' | {error, {Reason :: term(), serverRef()}}.
 receive_response(RequestId, Timeout) ->
    gen:receive_response(RequestId, Timeout).
 
@@ -695,6 +708,14 @@ receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState,
                matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, Request);
             {'$gen_cast', Cast} ->
                matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Cast);
+            {'gen_clfn', From, MFA} ->
+               matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, MFA, false);
+            {'gen_clfs', From, MFA} ->
+               matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, MFA, true);
+            {'gen_csfn', MFA} ->
+               matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false, MFA, false);
+            {'gen_csfs', MFA} ->
+               matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false, MFA, true);
             {timeout, TimerRef, TimeoutName} ->
                case Timers of
                   #{TimeoutName := {TimerRef, TimeoutMsg}} ->
@@ -719,10 +740,10 @@ matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
    NewDebug = ?SYS_DEBUG(Debug, Name, {in, {{call, From}, Request}}),
    try Module:handleCall(Request, CurState, From) of
       Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From)
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From, false)
    catch
       throw:Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From);
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From, false);
       Class:Reason:Strace ->
          terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {{call, From}, Request})
    end.
@@ -731,22 +752,42 @@ matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurStat
    NewDebug = ?SYS_DEBUG(Debug, Name, {in, {cast, Cast}}),
    try Module:handleCast(Cast, CurState) of
       Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false)
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false, false)
    catch
       throw:Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false, false);
       Class:Reason:Strace ->
          terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {cast, Cast})
+   end.
+
+matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, MFA, IsWithState) ->
+   NewDebug = ?SYS_DEBUG(Debug, Name, {in, {mfa, MFA}}),
+   try
+      {M, F, A} = MFA,
+      case IsWithState of
+         true ->
+            erlang:apply(M, F, A ++ [CurState]);
+         _ ->
+            erlang:apply(M, F, A)
+      end
+   of
+      Result ->
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From, true)
+   catch
+      throw:Result ->
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From, true);
+      Class:Reason:Strace ->
+         terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {mfa, MFA})
    end.
 
 matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg) ->
    NewDebug = ?SYS_DEBUG(Debug, Name, {in, {info, Msg}}),
    try Module:handleInfo(Msg, CurState) of
       Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false)
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false, false)
    catch
       throw:Result ->
-         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false);
+         handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, false, false);
       Class:Reason:Strace ->
          terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {info, Msg})
    end.
@@ -763,7 +804,7 @@ doAfterCall(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState
          terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {doAfter, Args})
    end.
 
-handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Result, From) ->
+handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Result, From, IsAnyRet) ->
    case Result of
       kpS ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false);
@@ -791,6 +832,13 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, R
             terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, NewState, {return, stop_reply})
          after
             _ = reply(From, Reply)
+         end;
+      _AnyRet ->
+         case IsAnyRet of
+            true ->
+               receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false);
+            _ ->
+               terminate(exit, bad_ret, ?STACKTRACE(), Name, Module, Debug, Timers, CurState, {return, _AnyRet})
          end
    end.
 

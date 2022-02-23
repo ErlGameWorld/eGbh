@@ -16,8 +16,8 @@
 -callback handleEvent(Event :: term(), State :: term()) ->
    kpS |
    removeEpm |
-   {ok, NewState :: term()} |
-   {ok, NewState :: term(), hibernate} |
+   {noreply, NewState :: term()} |
+   {noreply, NewState :: term(), hibernate} |
    {swapEpm, NewState :: term(), Args1 :: term(), NewHandler :: gen_ipc:epmHandler(), Args2 :: term()}.
 
 -callback handleCall(Request :: term(), State :: term()) ->
@@ -30,8 +30,8 @@
 -callback handleInfo(Info :: term(), State :: term()) ->
    kpS |
    removeEpm |
-   {ok, NewState :: term()} |
-   {ok, NewState :: term(), hibernate} |
+   {noreply, NewState :: term()} |
+   {noreply, NewState :: term(), hibernate} |
    {swapEpm, NewState :: term(), Args1 :: term(), NewHandler :: gen_ipc:epmHandler(), Args2 :: term()}.
 
 -callback terminate(Args :: terminateArgs(), State :: term()) -> term().
