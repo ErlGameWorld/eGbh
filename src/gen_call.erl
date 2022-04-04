@@ -1,6 +1,6 @@
 -module(gen_call).
 
--export([gcall/3, gcall/4, greply/2]).
+-export([gcall/3, gcall/4, greply/2, try_greply/2]).
 
 -define(default_timeout, 5000).
 
@@ -127,3 +127,8 @@ greply({_To, [[alias | Alias] | _] = Tag}, Reply) when is_reference(Alias) ->
    Alias ! {Tag, Reply}, ok;
 greply({To, Tag}, Reply) ->
    try To ! {Tag, Reply}, ok catch _:_ -> ok end.
+
+try_greply(false, _Msg) ->
+   ignore;
+try_greply(From, Reply) ->
+   greply(From, Reply).

@@ -5,7 +5,7 @@
 
 -include_lib("kernel/include/logger.hrl").
 
--import(gen_call, [gcall/3, gcall/4, greply/2]).
+-import(gen_call, [gcall/3, gcall/4, greply/2, try_greply/2]).
 
 -export([
    %% API for gen_srv
@@ -238,7 +238,6 @@ init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
          exit(Error)
    end.
 
-
 %%-----------------------------------------------------------------
 %% enter_loop(Module, Options, State, <ServerName>, <TimeOut>) ->_
 %%
@@ -310,7 +309,7 @@ system_code_change({Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib
       try Module:code_change(OldVsn, CurState, Extra)
       catch
          throw:Result -> Result;
-         _C:_R -> {_R, _R}
+         _C:_R:_S -> {_C, _R, _S}
       end
    of
       {ok, NewState} -> {ok, {Name, Module, HibernateAfterTimeout, Timers, NewState, IsHib}};
@@ -776,6 +775,9 @@ matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, F
    catch
       throw:Result ->
          handleCR(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, Result, From, true);
+      error:undef ->
+         try_greply(From, {error, undef}),
+         receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, false);
       Class:Reason:Strace ->
          terminate(Class, Reason, Strace, Name, Module, NewDebug, Timers, CurState, {mfa, MFA})
    end.
@@ -809,13 +811,13 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, R
       kpS ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false);
       {reply, Reply} ->
-         reply(From, Reply),
+         greply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, CurState}),
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, false);
       {noreply, NewState} ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, false);
       {reply, Reply, NewState} ->
-         reply(From, Reply),
+         greply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, NewState, false);
       {noreply, NewState, Actions} ->
@@ -823,7 +825,7 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, R
       {stop, Reason, NewState} ->
          terminate(exit, Reason, ?STACKTRACE(), Name, Module, Debug, Timers, NewState, {return, stop});
       {reply, Reply, NewState, Actions} ->
-         reply(From, Reply),
+         greply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, NewState, listify(Actions));
       {stopReply, Reason, Reply, NewState} ->
@@ -831,7 +833,7 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, R
          try
             terminate(exit, Reason, ?STACKTRACE(), Name, Module, NewDebug, Timers, NewState, {return, stop_reply})
          after
-            _ = reply(From, Reply)
+            _ = greply(From, Reply)
          end;
       _AnyRet ->
          case IsAnyRet of
@@ -1014,10 +1016,10 @@ try_terminate(Mod, Reason, State) ->
          try
             {ok, Mod:terminate(Reason, State)}
          catch
-            throw:R ->
-               {ok, R};
-            Class:R ->
-               {'EXIT', Class, R, ?STACKTRACE()}
+            throw:Ret ->
+               {ok, Ret};
+            Class:Reason:Strace ->
+               {'EXIT', Class, Reason, Strace}
          end;
       false ->
          {ok, ok}

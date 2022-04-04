@@ -6,7 +6,7 @@
 -include_lib("kernel/include/logger.hrl").
 
 -import(maps, [iterator/1, next/1]).
--import(gen_call, [gcall/3, gcall/4, greply/2]).
+-import(gen_call, [gcall/3, gcall/4, greply/2, try_greply/2]).
 
 -export([
    %% API for gen_emm
@@ -528,12 +528,12 @@ doEpmHandle(EpmHers, EpmId, Func, Event, From) ->
          catch
             throw:Ret ->
                handleEpmCR(Ret, EpmHers, EpmId, EpmHer, Event, From);
-            C:R:S ->
-               epmTerminate(EpmHer, {error, {C, R, S}}, Event, crash),
+            Class:Reason:Strace ->
+               epmTerminate(EpmHer, {error, {Class, Reason, Strace}}, Event, crash),
                maps:remove(EpmId, EpmHers)
          end;
       _ ->
-         try_reply(From, {error, bad_module}),
+         try_greply(From, {error, bad_module}),
          EpmHers
    end.
 
@@ -689,11 +689,6 @@ epmTerminate(#epmHer{epmM = EpmM, epmS = State} = EpmHer, Args, LastIn, Reason) 
 -compile({inline, [reply/2]}).
 -spec reply(From :: from(), Reply :: term()) -> ok.
 reply(From, Reply) ->
-   greply(From, Reply).
-
-try_reply(false, _Msg) ->
-   ignore;
-try_reply(From, Reply) ->
    greply(From, Reply).
 
 terminate_server(Reason, _Parent, _ServerName, EpmHers) ->

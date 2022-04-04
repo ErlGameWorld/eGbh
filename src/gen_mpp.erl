@@ -1,4 +1,4 @@
--module(gen_apu).
+-module(gen_mpp).
 
 -compile(inline).
 -compile({inline_size, 128}).
@@ -8,7 +8,7 @@
 -import(gen_call, [gcall/3, gcall/4, greply/2, try_greply/2]).
 
 -export([
-   %% API for gen_apu
+   %% API for gen_mpp
    start/3, start/4, start_link/3, start_link/4
    , start_monitor/3, start_monitor/4
    , stop/1, stop/3
@@ -81,19 +81,11 @@
 -type action() ::
    timeout() |
    hibernate |
-   {'doAfter', Args :: term()} |
-   {'nTimeout', Name :: term(), Time :: timeouts(), TimeoutMsg :: term()} |
-   {'nTimeout', Name :: term(), Time :: timeouts(), TimeoutMsg :: term(), Options :: ([timeoutOption()])} |
-   {'uTimeout', Name :: term(), TimeoutMsg :: term()} |
-   {'cTimeout', Name :: term()}.
+   {'doAfter', Args :: term()}.
 
 -type actions() ::
    action() |
    [action(), ...].
-
--type timeouts() :: Time :: timeout() | integer().
--type timeoutOption() :: {abs, Abs :: boolean()}.
-%% -type timer() :: #{TimeoutName :: atom() => {TimerRef :: reference(), TimeoutMsg :: term()}}.
 
 %% gcall 发送消息来源进程格式类型
 -type from() :: {To :: pid(), Tag :: term()}.
@@ -246,9 +238,9 @@ init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
 %%-----------------------------------------------------------------
 %% enter_loop(Module, Options, State, <ServerName>, <TimeOut>) ->_
 %%
-%% Description: Makes an existing process into a gen_apu.
-%%              The calling process will enter the gen_apu receive
-%%              loop and become a gen_apu process.
+%% Description: Makes an existing process into a gen_mpp.
+%%              The calling process will enter the gen_mpp receive
+%%              loop and become a gen_mpp process.
 %%              The process *must* have been started using one of the
 %%              start functions in proc_lib, see proc_lib(3).
 %%              The user is responsible for any initialization of the
@@ -720,14 +712,6 @@ receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState,
                matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false, MFA, false);
             {'gen_csfs', MFA} ->
                matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false, MFA, true);
-            {timeout, TimerRef, TimeoutName} ->
-               case Timers of
-                  #{TimeoutName := {TimerRef, TimeoutMsg}} ->
-                     NewTimer = maps:remove(TimeoutName, Timers),
-                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, NewTimer, CurState, TimeoutMsg);
-                  _ ->
-                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Msg)
-               end;
             {system, PidFrom, Request} ->
                %% 不返回但尾递归调用 system_continue/3
                sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {Name, Module, HibernateAfterTimeout, Timers, CurState, IsHib}, IsHib);
@@ -891,34 +875,6 @@ doParseAL([OneAction | LeftActions], Name, Debug, IsHib, DoAfter, Timers) ->
          doParseAL(LeftActions, Name, Debug, true, DoAfter, Timers);
       {'doAfter', _Args} ->
          doParseAL(LeftActions, Name, Debug, IsHib, OneAction, Timers);
-      {'nTimeout', TimeoutName, Time, TimeoutMsg, Options} ->
-         case Time of
-            infinity ->
-               NewTimers = doCancelTimer(TimeoutName, Timers),
-               doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, NewTimers);
-            _ ->
-               TimerRef = erlang:start_timer(Time, self(), TimeoutName, Options),
-               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {TimeoutName, Time, TimeoutMsg, Options}}),
-               NewTimers = doRegisterTimer(TimeoutName, TimerRef, TimeoutMsg, Timers),
-               doParseAL(LeftActions, Name, NewDebug, IsHib, DoAfter, NewTimers)
-         end;
-      {'nTimeout', TimeoutName, Time, TimeoutMsg} ->
-         case Time of
-            infinity ->
-               NewTimers = doCancelTimer(TimeoutName, Timers),
-               doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, NewTimers);
-            _ ->
-               TimerRef = erlang:start_timer(Time, self(), TimeoutName),
-               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {TimeoutName, Time, TimeoutMsg, []}}),
-               NewTimers = doRegisterTimer(TimeoutName, TimerRef, TimeoutMsg, Timers),
-               doParseAL(LeftActions, Name, NewDebug, IsHib, DoAfter, NewTimers)
-         end;
-      {'uTimeout', TimeoutName, NewTimeoutMsg} ->
-         NewTimers = doUpdateTimer(TimeoutName, NewTimeoutMsg, Timers),
-         doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, NewTimers);
-      {'cTimeout', TimeoutName} ->
-         NewTimers = doCancelTimer(TimeoutName, Timers),
-         doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, NewTimers);
       infinity ->
          doParseAL(LeftActions, Name, Debug, IsHib, DoAfter, Timers);
       Timeout when is_integer(Timeout) ->
@@ -930,62 +886,6 @@ doParseAL([OneAction | LeftActions], Name, Debug, IsHib, DoAfter, Timers) ->
    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% timer deal start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-
-doRegisterTimer(TimeoutType, NewTimerRef, TimeoutMsg, Timers) ->
-   case Timers of
-      #{TimeoutType := {OldTimerRef, _OldTimeMsg}} ->
-         justCancelTimer(TimeoutType, OldTimerRef),
-         Timers#{TimeoutType := {NewTimerRef, TimeoutMsg}};
-      _ ->
-         Timers#{TimeoutType => {NewTimerRef, TimeoutMsg}}
-   end.
-
-doCancelTimer(TimeoutType, Timers) ->
-   case Timers of
-      #{TimeoutType := {TimerRef, _TimeoutMsg}} ->
-         cancelTimer(TimeoutType, TimerRef, Timers);
-      _ ->
-         Timers
-   end.
-
-doUpdateTimer(TimeoutType, Timers, TimeoutMsg) ->
-   case Timers of
-      #{TimeoutType := {TimerRef, _OldTimeoutMsg}} ->
-         Timers#{TimeoutType := {TimerRef, TimeoutMsg}};
-      _ ->
-         Timers
-   end.
-
-justCancelTimer(TimeoutType, TimerRef) ->
-   case erlang:cancel_timer(TimerRef) of
-      false ->
-         %% 找不到计时器，我们还没有看到超时消息
-         receive
-            {timeout, TimerRef, TimeoutType} ->
-               %% 丢弃该超时消息
-               ok
-         after 0 ->
-            ok
-         end;
-      _ ->
-         %% Timer 已经运行了
-         ok
-   end.
-
-cancelTimer(TimeoutType, TimerRef, Timers) ->
-   case erlang:cancel_timer(TimerRef) of
-      false ->                                     % 找不到计时器，我们还没有看到超时消息
-         receive
-            {timeout, TimerRef, TimeoutType} ->
-               ok                                  % 丢弃该超时消息
-         after 0 ->
-            ok
-         end;
-      _ ->
-         ok                                        % Timer 已经运行了
-   end,
-   maps:remove(TimeoutType, Timers).
-
 listify(Item) when is_list(Item) ->
    Item;
 listify(Item) ->
@@ -1061,7 +961,7 @@ error_info(_Reason, application_controller, _From, _Msg, _Mod, _State, _Debug) -
    ok;
 error_info(Reason, Name, From, Msg, Module, Debug, State) ->
    Log = sys:get_log(Debug),
-   ?LOG_ERROR(#{label => {gen_apu, terminate},
+   ?LOG_ERROR(#{label => {gen_mpp, terminate},
       name => Name,
       last_message => Msg,
       state => format_status(terminate, Module, get(), State),
@@ -1070,8 +970,8 @@ error_info(Reason, Name, From, Msg, Module, Debug, State) ->
       client_info => client_stacktrace(From)},
       #{
          domain => [otp],
-         report_cb => fun gen_apu:format_log/2,
-         error_logger => #{tag => error, report_cb => fun gen_apu:format_log/1}
+         report_cb => fun gen_mpp:format_log/2,
+         error_logger => #{tag => error, report_cb => fun gen_mpp:format_log/1}
       }),
    ok.
 
@@ -1107,7 +1007,7 @@ format_log(Report) ->
 
 limit_report(Report, unlimited) ->
    Report;
-limit_report(#{label := {gen_apu, terminate},
+limit_report(#{label := {gen_mpp, terminate},
    last_message := Msg,
    state := State,
    log := Log,
@@ -1121,7 +1021,7 @@ limit_report(#{label := {gen_apu, terminate},
       reason => io_lib:limit_term(Reason, Depth),
       client_info => limit_client_report(Client, Depth)
    };
-limit_report(#{label := {gen_apu, no_handle_info},
+limit_report(#{label := {gen_mpp, no_handle_info},
    message := Msg} = Report, Depth) ->
    Report#{message => io_lib:limit_term(Msg, Depth)}.
 
@@ -1148,7 +1048,7 @@ format_log(Report, FormatOpts0) ->
    {Format, Args} = format_log_single(Report, FormatOpts),
    io_lib:format(Format, Args, IoOpts).
 
-format_log_single(#{label := {gen_apu, terminate},
+format_log_single(#{label := {gen_mpp, terminate},
    name := Name,
    last_message := Msg,
    state := State,
@@ -1171,7 +1071,7 @@ format_log_single(#{label := {gen_apu, terminate},
       end,
    {Format1 ++ ServerLogFormat ++ ClientLogFormat,
          Args1 ++ ServerLogArgs ++ ClientLogArgs};
-format_log_single(#{label := {gen_apu, no_handle_info},
+format_log_single(#{label := {gen_mpp, no_handle_info},
    module := Module,
    message := Msg},
    #{single_line := true, depth := Depth} = FormatOpts) ->
@@ -1189,7 +1089,7 @@ format_log_single(#{label := {gen_apu, no_handle_info},
 format_log_single(Report, FormatOpts) ->
    format_log_multi(Report, FormatOpts).
 
-format_log_multi(#{label := {gen_apu, terminate},
+format_log_multi(#{label := {gen_mpp, terminate},
    name := Name,
    last_message := Msg,
    state := State,
@@ -1224,7 +1124,7 @@ format_log_multi(#{label := {gen_apu, terminate},
                end ++ ClientArgs
       end,
    {Format, Args};
-format_log_multi(#{label := {gen_apu, no_handle_info},
+format_log_multi(#{label := {gen_mpp, no_handle_info},
    module := Module,
    message := Msg},
    #{depth := Depth} = FormatOpts) ->
