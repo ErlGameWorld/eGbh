@@ -12,6 +12,7 @@
     gen_emm         gen_event_management module
     gen_tcm         gen_tcp_callback_module
     gen_apu         gen_Automatic_processing_unit
+    gen_mpp         gen_Massively Parallel Processor
 
 # gen_ipc
 

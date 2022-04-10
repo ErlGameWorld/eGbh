@@ -116,6 +116,9 @@
    {reply, Reply :: term(), NewState :: term(), Actions :: actions()} |
    {noreply, NewState :: term()} |
    {noreply, NewState :: term(), Actions :: actions()} |
+   {mayReply, Reply :: term()} |
+   {mayReply, Reply :: term(), NewState :: term()} |
+   {mayReply, Reply :: term(), NewState :: term(), Actions :: actions()} |
    {stop, Reason :: term(), NewState :: term()} |
    {stopReply, Reason :: term(), Reply :: term(), NewState :: term()}.
 
@@ -814,12 +817,30 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, R
          greply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, CurState}),
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, false);
+      {mayReply, Reply} ->
+         case From of
+            false ->
+               receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false);
+            _ ->
+               greply(From, Reply),
+               NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, CurState}),
+               receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, CurState, false)
+         end;
       {noreply, NewState} ->
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, false);
       {reply, Reply, NewState} ->
          greply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, NewState, false);
+      {mayReply, Reply, NewState} ->
+         case From of
+            false ->
+               receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, false);
+            _ ->
+               greply(From, Reply),
+               NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
+               receiveIng(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, NewState, false)
+         end;
       {noreply, NewState, Actions} ->
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, listify(Actions));
       {stop, Reason, NewState} ->
@@ -828,6 +849,16 @@ handleCR(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, R
          greply(From, Reply),
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, NewState, listify(Actions));
+      {mayReply, Reply, NewState, Actions} ->
+         case From of
+            false ->
+               loopEntry(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, NewState, listify(Actions));
+            _ ->
+
+               greply(From, Reply),
+               NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
+               loopEntry(Parent, Name, Module, HibernateAfterTimeout, NewDebug, Timers, NewState, listify(Actions))
+         end;
       {stopReply, Reason, Reply, NewState} ->
          NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From, NewState}),
          try
