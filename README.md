@@ -38,6 +38,9 @@
 # gen_apu 
     功能与gen_srv一致 只是 call和cast消息 不在调用 handle_call handle_cast函数 而是取消息的第一个参数作为函数名 调用回调模块的这个函数
 
+# gen_mpp
+    功能与gen_apu一致 只是 不自带定时器相关封装
+
     
     
     

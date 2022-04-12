@@ -715,13 +715,13 @@ receiveIng(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState,
                matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, Request);
             {'$gen_cast', Cast} ->
                matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, Cast);
-            {'gen_clfn', From, MFA} ->
+            {'$gen_clfn', From, MFA} ->
                matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, MFA, false);
-            {'gen_clfs', From, MFA} ->
+            {'$gen_clfs', From, MFA} ->
                matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, From, MFA, true);
-            {'gen_csfn', MFA} ->
+            {'$gen_csfn', MFA} ->
                matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false, MFA, false);
-            {'gen_csfs', MFA} ->
+            {'$gen_csfs', MFA} ->
                matchMFA(Parent, Name, Module, HibernateAfterTimeout, Debug, Timers, CurState, false, MFA, true);
             {timeout, TimerRef, TimeoutName} ->
                case Timers of
