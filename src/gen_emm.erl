@@ -4,6 +4,7 @@
 -compile({inline_size, 128}).
 
 -include_lib("kernel/include/logger.hrl").
+-include("genGbh.hrl").
 
 -import(maps, [iterator/1, next/1]).
 -import(gen_call, [gcall/3, gcall/4, greply/2, try_greply/2]).
@@ -15,7 +16,13 @@
    , stop/1, stop/3
    , call/3, call/4
    , send/3
-   , send_request/3, wait_response/2, receive_response/2, check_response/2
+
+   , send_request/3, send_request/5
+   , wait_response/2, receive_response/2, check_response/2
+   , wait_response/3, receive_response/3, check_response/3
+   , reqids_new/0, reqids_size/1
+   , reqids_add/3, reqids_to_list/1
+
    , info_notify/2, call_notify/2
    , add_epm/3, add_sup_epm/3, del_epm/3
    , swap_epm/3, swap_sup_epm/3
@@ -36,20 +43,10 @@
    , wakeupFromHib/5
 
    %% logger callback
-   , format_log/1, format_log/2
+   , format_log/1, format_log/2, print_event/3
 ]).
 
 -define(STACKTRACE(), element(2, erlang:process_info(self(), current_stacktrace))).
-
-%% debug 调试相关宏定义
--define(NOT_DEBUG, []).
--define(SYS_DEBUG(Debug, Name, Msg),
-   case Debug of
-      ?NOT_DEBUG ->
-         Debug;
-      _ ->
-         sys:handle_debug(Debug, fun print_event/3, Name, Msg)
-   end).
 
 -type epmHandler() ::
    atom() |
@@ -106,7 +103,9 @@
    {'error', term()}.
 
 -type from() :: {To :: pid(), Tag :: term()}.
--type requestId() :: term().
+-type request_id() :: gen:request_id().
+-type request_id_collection() :: gen:request_id_collection().
+-type response_timeout() :: timeout() | {abs, integer()}.
 
 -record(epmHer, {
    epmId = undefined :: term(),
@@ -265,30 +264,182 @@ call(EpmSrv, EpmHandler, Query, Timeout) ->
 send(EpmSrv, EpmHandler, Msg) ->
    epmRequest(EpmSrv, {'$epm_info', EpmHandler, Msg}).
 
--spec send_request(serverRef(), epmHandler(), term()) -> requestId().
-send_request(EpmSrv, EpmHandler, Query) ->
-   gen:send_request(EpmSrv, '$epm_call', {'$epmCall', EpmHandler, Query}).
-
--spec wait_response(RequestId :: requestId(), timeout()) -> {reply, Reply :: term()} | 'timeout' | {error, {Reason :: term(), serverRef()}}.
-wait_response(RequestId, Timeout) ->
-   case gen:wait_response(RequestId, Timeout) of
-      {reply, {error, _} = Err} -> Err;
-      Return -> Return
+-spec send_request(EventMgrRef::serverRef, Handler::epmHandler(), Request::term()) ->
+   ReqId::request_id().
+send_request(M, Handler, Request) ->
+   try
+      gen:send_request(M, '$epm_call', {'$epmCall', Handler, Request})
+   catch
+      error:badarg ->
+         error(badarg, [M, Handler, Request])
    end.
 
--spec receive_response(RequestId :: requestId(), timeout()) -> {reply, Reply :: term()} | 'timeout' | {error, {Reason :: term(), serverRef()}}.
-receive_response(RequestId, Timeout) ->
-   case gen:receive_response(RequestId, Timeout) of
-      {reply, {error, _} = Err} -> Err;
-      Return -> Return
+-spec send_request(EventMgrRef::serverRef,
+   Handler::epmHandler(),
+   Request::term(),
+   Label::term(),
+   ReqIdCollection::request_id_collection()) ->
+   NewReqIdCollection::request_id_collection().
+send_request(M, Handler, Request, Label, ReqIdCol) ->
+   try
+      gen:send_request(M, '$epm_call', {'$epmCall', Handler, Request}, Label, ReqIdCol)
+   catch
+      error:badarg ->
+         error(badarg, [M, Handler, Request, Label, ReqIdCol])
    end.
 
--spec check_response(Msg :: term(), RequestId :: requestId()) ->
-   {reply, Reply :: term()} | 'no_reply' | {error, {Reason :: term(), serverRef()}}.
-check_response(Msg, RequestId) ->
-   case gen:check_response(Msg, RequestId) of
+-spec wait_response(ReqId, WaitTime) -> Result when
+   ReqId :: request_id(),
+   WaitTime :: response_timeout(),
+   Response :: {reply, Reply::term()}
+   | {error, {Reason::term(), serverRef}},
+   Result :: Response | 'timeout'.
+
+wait_response(ReqId, WaitTime) ->
+   try gen:wait_response(ReqId, WaitTime) of
       {reply, {error, _} = Err} -> Err;
       Return -> Return
+   catch
+      error:badarg ->
+         error(badarg, [ReqId, WaitTime])
+   end.
+
+-spec wait_response(ReqIdCollection, WaitTime, Delete) -> Result when
+   ReqIdCollection :: request_id_collection(),
+   WaitTime :: response_timeout(),
+   Delete :: boolean(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef}},
+   Result :: {Response,
+      Label::term(),
+      NewReqIdCollection::request_id_collection()} |
+   'no_request' |
+   'timeout'.
+
+wait_response(ReqIdCol, WaitTime, Delete) ->
+   try gen:wait_response(ReqIdCol, WaitTime, Delete) of
+      {{reply, {error, _} = Err}, Label, NewReqIdCol} ->
+         {Err, Label, NewReqIdCol};
+      Return ->
+         Return
+   catch
+      error:badarg ->
+         error(badarg, [ReqIdCol, WaitTime, Delete])
+   end.
+
+-spec receive_response(ReqId, Timeout) -> Result when
+   ReqId :: request_id(),
+   Timeout :: response_timeout(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef}},
+   Result :: Response | 'timeout'.
+
+receive_response(ReqId, Timeout) ->
+   try gen:receive_response(ReqId, Timeout) of
+      {reply, {error, _} = Err} -> Err;
+      Return -> Return
+   catch
+      error:badarg ->
+         error(badarg, [ReqId, Timeout])
+   end.
+
+-spec receive_response(ReqIdCollection, Timeout, Delete) -> Result when
+   ReqIdCollection :: request_id_collection(),
+   Timeout :: response_timeout(),
+   Delete :: boolean(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef}},
+   Result :: {Response,
+      Label::term(),
+      NewReqIdCollection::request_id_collection()} |
+   'no_request' |
+   'timeout'.
+
+receive_response(ReqIdCol, Timeout, Delete) ->
+   try gen:receive_response(ReqIdCol, Timeout, Delete) of
+      {{reply, {error, _} = Err}, Label, NewReqIdCol} ->
+         {Err, Label, NewReqIdCol};
+      Return ->
+         Return
+   catch
+      error:badarg ->
+         error(badarg, [ReqIdCol, Timeout, Delete])
+   end.
+
+-spec check_response(Msg, ReqId) -> Result when
+   Msg :: term(),
+   ReqId :: request_id(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef}},
+   Result :: Response | 'no_reply'.
+
+check_response(Msg, ReqId) ->
+   try gen:check_response(Msg, ReqId) of
+      {reply, {error, _} = Err} -> Err;
+      Return -> Return
+   catch
+      error:badarg ->
+         error(badarg, [Msg, ReqId])
+   end.
+
+-spec check_response(Msg, ReqIdCollection, Delete) -> Result when
+   Msg :: term(),
+   ReqIdCollection :: request_id_collection(),
+   Delete :: boolean(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef}},
+   Result :: {Response,
+      Label::term(),
+      NewReqIdCollection::request_id_collection()} |
+   'no_request' |
+   'no_reply'.
+
+check_response(Msg, ReqIdCol, Delete) ->
+   try gen:check_response(Msg, ReqIdCol, Delete) of
+      {{reply, {error, _} = Err}, Label, NewReqIdCol} ->
+         {Err, Label, NewReqIdCol};
+      Return ->
+         Return
+   catch
+      error:badarg ->
+         error(badarg, [Msg, ReqIdCol, Delete])
+   end.
+
+-spec reqids_new() ->
+   NewReqIdCollection::request_id_collection().
+
+reqids_new() ->
+   gen:reqids_new().
+
+-spec reqids_size(ReqIdCollection::request_id_collection()) ->
+   non_neg_integer().
+
+reqids_size(ReqIdCollection) ->
+   try
+      gen:reqids_size(ReqIdCollection)
+   catch
+      error:badarg -> error(badarg, [ReqIdCollection])
+   end.
+
+-spec reqids_add(ReqId::request_id(), Label::term(),
+   ReqIdCollection::request_id_collection()) ->
+   NewReqIdCollection::request_id_collection().
+
+reqids_add(ReqId, Label, ReqIdCollection) ->
+   try
+      gen:reqids_add(ReqId, Label, ReqIdCollection)
+   catch
+      error:badarg -> error(badarg, [ReqId, Label, ReqIdCollection])
+   end.
+
+-spec reqids_to_list(ReqIdCollection::request_id_collection()) ->
+   [{ReqId::request_id(), Label::term()}].
+
+reqids_to_list(ReqIdCollection) ->
+   try
+      gen:reqids_to_list(ReqIdCollection)
+   catch
+      error:badarg -> error(badarg, [ReqIdCollection])
    end.
 
 epmRpc(EpmSrv, Cmd) ->
@@ -346,65 +497,65 @@ receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, IsHib) ->
    end.
 
 epmCallMsg(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, From, Request) ->
-   NewDebug = ?SYS_DEBUG(Debug, ServerName, {call, From, Request}),
+   ?SYS_DEBUG(Debug, ServerName, {call, From, Request}),
    case Request of
       '$which_handlers' ->
          reply(From, maps:keys(EpmHers)),
-         receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, NewDebug, false);
+         receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, false);
       {'$addEpm', EpmHandler, Args} ->
          {Reply, NewEpmHers, IsHib} = doAddEpm(EpmHers, EpmHandler, Args, undefined),
          reply(From, Reply),
-         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib);
+         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, IsHib);
       {'$addSupEpm', EpmHandler, Args, EpmSup} ->
          {Reply, NewEpmHers, IsHib} = doAddSupEpm(EpmHers, EpmHandler, Args, EpmSup),
          reply(From, Reply),
-         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib);
+         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, IsHib);
       {'$delEpm', EpmHandler, Args} ->
          {Reply, NewEpmHers} = doDelEpm(EpmHers, EpmHandler, Args),
          reply(From, Reply),
-         receiveIng(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, false);
+         receiveIng(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, false);
       {'$swapEpm', EpmId1, Args1, EpmId2, Args2} ->
          {Reply, NewEpmHers, IsHib} = doSwapEpm(EpmHers, EpmId1, Args1, EpmId2, Args2),
          reply(From, Reply),
-         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib);
+         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, IsHib);
       {'$swapSupEpm', EpmId1, Args1, EpmId2, Args2, SupPid} ->
          {Reply, NewEpmHers, IsHib} = doSwapSupEpm(EpmHers, EpmId1, Args1, EpmId2, Args2, SupPid),
          reply(From, Reply),
-         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib);
+         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, IsHib);
       {'$syncNotify', Event} ->
          {NewEpmHers, IsHib} = doNotify(EpmHers, handleEvent, Event, false),
          reply(From, ok),
-         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib);
+         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, IsHib);
       {'$epmCall', EpmHandler, Query} ->
          case doEpmHandle(EpmHers, EpmHandler, handleCall, Query, From) of
             {NewEpmHers, IsHib} ->
-               loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib);
+               loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, IsHib);
             NewEpmHers ->
-               loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, false)
+               loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, false)
          end
    end.
 
 epmInfoMsg(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, CmdOrEmpHandler, Event) ->
-   NewDebug = ?SYS_DEBUG(Debug, ServerName, {info, CmdOrEmpHandler, Event}),
+   ?SYS_DEBUG(Debug, ServerName, {info, CmdOrEmpHandler, Event}),
    case CmdOrEmpHandler of
       '$infoNotify' ->
          {NewEpmHers, IsHib} = doNotify(EpmHers, handleEvent, Event, false),
-         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib);
+         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, IsHib);
       EpmHandler ->
          case doEpmHandle(EpmHers, EpmHandler, handleInfo, Event, false) of
             {NewEpmHers, IsHib} ->
-               loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib);
+               loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, IsHib);
             NewEpmHers ->
-               loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, false)
+               loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, false)
          end
    end.
 
 handleMsg(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, Msg) ->
-   NewDebug = ?SYS_DEBUG(Debug, ServerName, {in, Msg}),
+   ?SYS_DEBUG(Debug, ServerName, {in, Msg}),
    case Msg of
       {'EXIT', From, Reason} ->
          NewEpmHers = epmStopOne(From, EpmHers, Reason),
-         receiveIng(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, false);
+         receiveIng(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, false);
       {_From, Tag, stop} ->
          try terminate_server(normal, Parent, ServerName, EpmHers)
          after
@@ -412,13 +563,13 @@ handleMsg(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, Msg) ->
          end;
       {_From, Tag, get_modules} ->
          reply(Tag, get_modules(EpmHers)),
-         receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, NewDebug, false);
+         receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, false);
       {_From, Tag, which_handlers} ->
          reply(Tag, maps:keys(EpmHers)),
-         receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, NewDebug, false);
+         receiveIng(Parent, ServerName, HibernateAfterTimeout, EpmHers, Debug, false);
       _ ->
          {NewEpmHers, IsHib} = doNotify(EpmHers, handleInfo, Msg, false),
-         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, NewDebug, IsHib)
+         loopEntry(Parent, ServerName, HibernateAfterTimeout, NewEpmHers, Debug, IsHib)
    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%

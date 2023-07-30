@@ -4,6 +4,7 @@
 -compile({inline_size, 128}).
 
 -include_lib("kernel/include/logger.hrl").
+-include("genGbh.hrl").
 
 -import(maps, [iterator/1, next/1]).
 -import(gen_call, [gcall/3, gcall/4, greply/2, try_greply/2]).
@@ -16,7 +17,13 @@
    , cast/2, send/2
    , abcast/2, abcast/3
    , call/2, call/3
-   , send_request/2, wait_response/1, wait_response/2, receive_response/1, receive_response/2, check_response/2
+
+   , send_request/2, send_request/4
+   , wait_response/2, receive_response/2, check_response/2
+   , wait_response/3, receive_response/3, check_response/3
+   , reqids_new/0, reqids_size/1
+   , reqids_add/3, reqids_to_list/1
+
    , multi_call/2, multi_call/3, multi_call/4
    , enter_loop/4, enter_loop/5, enter_loop/6
    , reply/1, reply/2
@@ -46,6 +53,7 @@
    , format_log/1
    , format_log/2
    , epm_log/1
+   , print_event/3
 ]).
 
 % 简写备注**********************************
@@ -71,22 +79,14 @@
 -define(CB_FORM_AFTER, 2).             %% 从after 回调返回
 -define(CB_FORM_EVENT, 3).             %% 从event 回调返回
 
-%% debug 调试相关宏定义
--define(NOT_DEBUG, []).
--define(SYS_DEBUG(Debug, Name, SystemEvent),
-   case Debug of
-      ?NOT_DEBUG ->
-         Debug;
-      _ ->
-         sys:handle_debug(Debug, fun print_event/3, Name, SystemEvent)
-   end).
-
 %%%==========================================================================
 %%% Interface functions.
 %%%==========================================================================
 %% gcall 发送消息来源进程格式类型
 -type from() :: {To :: pid(), Tag :: term()}.
--type requestId() :: term().
+-type request_id() :: gen:request_id().
+-type request_id_collection() :: gen:request_id_collection().
+-type response_timeout() :: timeout() | {abs, integer()}.
 
 %% 事件类型
 -type eventType() :: externalEventType() | timeoutEventType() | {'onevent', Subtype :: term()}.
@@ -179,9 +179,9 @@
    {'reply', Reply :: term(), NewState :: term()} |                                                                    % 用作gen_server模式时快速响应进入消息接收
    {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term()} |                                             % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
    {'noreply', NewState :: term()} |                                                                                   % 用作gen_server模式时快速响应进入消息接收
-   {'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args}} |                            % 用作gen_server模式时快速响应进入消息接收
+   {'reply', Reply :: term(), NewState :: term(), Options :: hibernate | {doAfter, Args :: term()}} |                            % 用作gen_server模式时快速响应进入消息接收
    {'sreply', Reply :: term(), NextStatus :: term(), NewState :: term(), Actions :: actions(eventAction())} |          % 用作gen_ipc模式便捷式返回reply 而不用把reply放在actions列表中
-   {'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args}} |                                           % 用作gen_server模式时快速响应进入循环
+   {'noreply', NewState :: term(), Options :: hibernate | {doAfter, Args :: term()}} |                                           % 用作gen_server模式时快速响应进入循环
    {'nextS', NextStatus :: term(), NewState :: term()} |                                                               % {next_status,NextS,NewData,[]}
    {'nextS', NextStatus :: term(), NewState :: term(), Actions :: actions(eventAction())} |                            % Status transition, maybe to the same status
    commonCallbackResult(eventAction()).
@@ -243,6 +243,10 @@
 -callback handleInfo(EventContent :: term(), Status :: term(), State :: term()) ->
    eventCallbackResult().
 
+%% error 回调函数 守护模式下 进程捕捉到错误可以回调次函数
+-callback handleError(Error :: term(), State :: term()) ->
+   eventCallbackResult().
+
 %% 内部事件 Onevent 包括actions 设置的定时器超时产生的事件 和 nextE产生的超时事件 但是不是 call cast info 回调函数 以及其他自定义定时事件 的回调函数
 %% 并且这里需要注意 其他erlang:start_timer生成超时事件发送的消息 不能和gen_ipc定时器关键字重合 有可能会导致一些问题
 -callback handleOnevent(EventType :: term(), EventContent :: term(), Status :: term(), State :: term()) ->
@@ -286,6 +290,7 @@
    , code_change/4
    , handleEnter/3
    , handleAfter/3
+   , handleError/2
    , handleOnevent/4
    , handleEpmEvent/3
    , handleEpmCall/3
@@ -313,6 +318,7 @@
    {'via', RegMod :: module(), ViaName :: term()}.
 
 -type startOpt() ::
+   daemon |
    {'timeout', Time :: timeout()} |
    {'spawn_opt', [proc_lib:spawn_option()]} |
    enterLoopOpt().
@@ -376,17 +382,18 @@ init_it(Starter, self, ServerRef, Module, Args, Opts) ->
 init_it(Starter, Parent, ServerRef, Module, Args, Opts) ->
    Name = gen:name(ServerRef),
    Debug = gen:debug_options(Name, Opts),
+   GbhOpts = #gbhOpts{daemon = lists:member(daemon, Opts)},
    HibernateAfterTimeout = gen:hibernate_after(Opts),
    case doModuleInit(Module, Args) of
       {ok, State} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, undefined, State, []);
+         loopEntry(Parent, Debug, Module, Name, GbhOpts, HibernateAfterTimeout, undefined, State, []);
       {ok, Status, State} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, Status, State, []);
+         loopEntry(Parent, Debug, Module, Name, GbhOpts, HibernateAfterTimeout, Status, State, []);
       {ok, Status, State, Actions} ->
          proc_lib:init_ack(Starter, {ok, self()}),
-         loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, Status, State, listify(Actions));
+         loopEntry(Parent, Debug, Module, Name, GbhOpts, HibernateAfterTimeout, Status, State, listify(Actions));
       {stop, Reason} ->
          gen:unregister_name(ServerRef),
          proc_lib:init_ack(Starter, {error, Reason}),
@@ -429,11 +436,12 @@ enter_loop(Module, Status, State, Opts, ServerName, Actions) ->
    Parent = gen:get_parent(),
    Name = gen:get_proc_name(ServerName),
    Debug = gen:debug_options(Name, Opts),
+   GbhOpts = #gbhOpts{daemon = lists:member(daemon, Opts)},
    HibernateAfterTimeout = gen:hibernate_after(Opts),
-   loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, Status, State, Actions).
+   loopEntry(Parent, Debug, Module, Name, GbhOpts, HibernateAfterTimeout, Status, State, Actions).
 
 %% 这里的 init_it/6 和 enter_loop/5,6,7 函数汇聚
-loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, CurStatus, CurState, Actions) ->
+loopEntry(Parent, Debug, Module, Name, GbhOpts, HibernateAfterTimeout, CurStatus, CurState, Actions) ->
    %% 如果该进程用于 gen_event 或者该进程需要捕捉退出信号 和 捕捉supervisor进程树的退出信息 则需要设置   process_flag(trap_exit, true) 需要在Actions返回 {trap_exit, true}
    MewActions =
       case lists:keyfind(trap_exit, 1, Actions) of
@@ -446,24 +454,24 @@ loopEntry(Parent, Debug, Module, Name, HibernateAfterTimeout, CurStatus, CurStat
             lists:keydelete(trap_exit, 1, Actions)
       end,
 
-   NewDebug = ?SYS_DEBUG(Debug, Name, {enter, CurStatus}),
+   ?SYS_DEBUG(Debug, Name, {enter, CurStatus}),
    %% 强制执行{postpone，false}以确保我们的假事件被丢弃
    LastActions = MewActions ++ [{isPos, false}],
-   parseEventAL(Parent, Name, Module, HibernateAfterTimeout, false, #{}, [], #{}, CurStatus, CurState, CurStatus, NewDebug, [{onevent, init_status}], true, LastActions, ?CB_FORM_EVENT).
+   parseEventAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, false, #{}, [], #{}, CurStatus, CurState, CurStatus, Debug, [{onevent, init_status}], true, LastActions, ?CB_FORM_EVENT).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%% sys callbacks start %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-system_continue(Parent, Debug, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}) ->
+system_continue(Parent, Debug, {Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}) ->
    if
       IsHib ->
-         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib]);
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug]);
       true ->
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib)
+         receiveIng(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, false)
    end.
 
-system_terminate(Reason, Parent, Debug, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, _IsHib}) ->
+system_terminate(Reason, Parent, Debug, {Parent, Name, Module, _GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, _IsHib}) ->
    terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, []).
 
-system_code_change({Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}, _Mod, OldVsn, Extra) ->
+system_code_change({Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}, _Mod, OldVsn, Extra) ->
    case
       try Module:code_change(OldVsn, CurStatus, CurState, Extra)
       catch
@@ -472,19 +480,19 @@ system_code_change({Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHer
       end
    of
       {ok, NewStatus, NewState} ->
-         {ok, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, NewStatus, NewState, IsHib}};
+         {ok, {Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, NewStatus, NewState, IsHib}};
       Error ->
          Error
    end.
 
-system_get_state({_Parent, _Name, _Module, _HibernateAfterTimeout, _IsEnter, _EpmHers, _Postponed, _Timers, CurStatus, CurState, _IsHib}) ->
+system_get_state({_Parent, _Name, _Module, _GbhOpts, _HibernateAfterTimeout, _IsEnter, _EpmHers, _Postponed, _Timers, CurStatus, CurState, _IsHib}) ->
    {ok, {CurStatus, CurState}}.
 
-system_replace_state(StatusFun, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}) ->
+system_replace_state(StatusFun, {Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}) ->
    {NewStatus, NewState} = StatusFun(CurStatus, CurState),
-   {ok, {NewStatus, NewState}, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, NewStatus, NewState, IsHib}}.
+   {ok, {NewStatus, NewState}, {Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, NewStatus, NewState, IsHib}}.
 
-format_status(Opt, [PDict, SysStatus, Parent, Debug, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, _IsHib}]) ->
+format_status(Opt, [PDict, SysStatus, Parent, Debug, {Parent, Name, Module, _GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, _IsHib}]) ->
    Header = gen:format_status_header("Status for gen_ipc", Name),
    Log = sys:get_log(Debug),
    [
@@ -523,55 +531,144 @@ call(ServerRef, Request, Timeout) ->
       erlang:raise(Class, {Reason, {?MODULE, call, [ServerRef, Request]}}, ?STACKTRACE())
    end.
 
-multi_call(Name, Request) when is_atom(Name) ->
-   do_multi_call([node() | nodes()], Name, Request, infinity).
+%%% -----------------------------------------------------------------
+%%% Make a call to servers at several nodes.
+%%% Returns: {[Replies],[BadNodes]}
+%%% A Timeout can be given
+%%%
+%%% A middleman process is used in case late answers arrives after
+%%% the timeout. If they would be allowed to glog the callers message
+%%% queue, it would probably become confused. Late answers will
+%%% now arrive to the terminated middleman and so be discarded.
+%%% -----------------------------------------------------------------
 
-multi_call(Nodes, Name, Request) when is_list(Nodes), is_atom(Name) ->
-   do_multi_call(Nodes, Name, Request, infinity).
+-spec multi_call(
+   Name    :: atom(),
+   Request :: term()
+) ->
+   {Replies ::
+   [{Node :: node(), Reply :: term()}],
+      BadNodes :: [node()]
+   }.
+%%
+multi_call(Name, Request)
+   when is_atom(Name) ->
+   multi_call([node() | nodes()], Name, Request, infinity).
 
-multi_call(Nodes, Name, Request, infinity) ->
-   do_multi_call(Nodes, Name, Request, infinity);
-multi_call(Nodes, Name, Request, Timeout) when is_list(Nodes), is_atom(Name), is_integer(Timeout), Timeout >= 0 ->
-   do_multi_call(Nodes, Name, Request, Timeout).
+-spec multi_call(
+   Nodes   :: [node()],
+   Name    :: atom(),
+   Request :: term()
+) ->
+   {Replies ::
+   [{Node :: node(), Reply :: term()}],
+      BadNodes :: [node()]
+   }.
+%%
+multi_call(Nodes, Name, Request)
+   when is_list(Nodes), is_atom(Name) ->
+   multi_call(Nodes, Name, Request, infinity).
 
-do_multi_call([Node], Name, Req, infinity) when Node =:= node() ->
-   % Special case when multi_call is used with local node only.
-   % In that case we can leverage the benefit of recv_mark optimisation
-   % existing in simple gcall.
-   try gcall(Name, '$gen_call', Req, infinity) of
-      {ok, Res} -> {[{Node, Res}], []}
-   catch exit:_ ->
-      {[], [Node]}
-   end;
-do_multi_call(Nodes, Name, Request, infinity) ->
-   Tag = make_ref(),
-   Monitors = send_nodes(Nodes, Name, Tag, Request),
-   rec_nodes(Tag, Monitors, Name, undefined);
-do_multi_call(Nodes, Name, Request, Timeout) ->
-   Tag = make_ref(),
-   Caller = self(),
-   Receiver = spawn(
-      fun() ->
-         process_flag(trap_exit, true),
-         Mref = erlang:monitor(process, Caller),
-         receive
-            {Caller, Tag} ->
-               Monitors = send_nodes(Nodes, Name, Tag, Request),
-               TimerId = erlang:start_timer(Timeout, self(), ok),
-               Result = rec_nodes(Tag, Monitors, Name, TimerId),
-               exit({self(), Tag, Result});
-            {'DOWN', Mref, _, _, _} ->
-               exit(normal)
-         end
-      end
-   ),
-   Mref = erlang:monitor(process, Receiver),
-   Receiver ! {self(), Tag},
+-spec multi_call(
+   Nodes   :: [node()],
+   Name    :: atom(),
+   Request :: term(),
+   Timeout :: timeout()
+) ->
+   {Replies ::
+   [{Node :: node(), Reply :: term()}],
+      BadNodes :: [node()]
+   }.
+-define(
+is_timeout(X), ( (X) =:= infinity orelse ( is_integer(X) andalso (X) >= 0 ) )).
+multi_call(Nodes, Name, Request, Timeout)
+   when is_list(Nodes), is_atom(Name), ?is_timeout(Timeout) ->
+   Alias = alias(),
+   try
+      Timer = if Timeout == infinity -> undefined;
+                 true -> erlang:start_timer(Timeout, self(), Alias)
+              end,
+      Reqs = mc_send(Nodes, Name, Alias, Request, Timer, []),
+      mc_recv(Reqs, Alias, Timer, [], [])
+   after
+      _ = unalias(Alias)
+   end.
+
+-dialyzer({no_improper_lists, mc_send/6}).
+
+mc_send([], _Name, _Alias, _Request, _Timer, Reqs) ->
+   Reqs;
+mc_send([Node|Nodes], Name, Alias, Request, Timer, Reqs) when is_atom(Node) ->
+   NN = {Name, Node},
+   Mon = try
+            erlang:monitor(process, NN, [{tag, Alias}])
+         catch
+            error:badarg ->
+               %% Node not alive...
+               M = make_ref(),
+               Alias ! {Alias, M, process, NN, noconnection},
+               M
+         end,
+   try
+      %% We use 'noconnect' since it is no point in bringing up a new
+      %% connection if it was not brought up by the monitor signal...
+      _ = erlang:send(NN,
+         {'$gen_call', {self(), [[alias|Alias]|Mon]}, Request},
+         [noconnect]),
+      ok
+   catch
+      _:_ ->
+         ok
+   end,
+   mc_send(Nodes, Name, Alias, Request, Timer, [[Node|Mon]|Reqs]);
+mc_send(_BadNodes, _Name, Alias, _Request, Timer, Reqs) ->
+   %% Cleanup then fail...
+   unalias(Alias),
+   mc_cancel_timer(Timer, Alias),
+   _ = mc_recv_tmo(Reqs, Alias, [], []),
+   error(badarg).
+
+mc_recv([], Alias, Timer, Replies, BadNodes) ->
+   mc_cancel_timer(Timer, Alias),
+   unalias(Alias),
+   {Replies, BadNodes};
+mc_recv([[Node|Mon] | RestReqs] = Reqs, Alias, Timer, Replies, BadNodes) ->
    receive
-      {'DOWN', Mref, _, _, {Receiver, Tag, Result}} ->
-         Result;
-      {'DOWN', Mref, _, _, Reason} ->
-         exit(Reason)
+      {[[alias|Alias]|Mon], Reply} ->
+         erlang:demonitor(Mon, [flush]),
+         mc_recv(RestReqs, Alias, Timer, [{Node,Reply}|Replies], BadNodes);
+      {Alias, Mon, process, _, _} ->
+         mc_recv(RestReqs, Alias, Timer, Replies, [Node|BadNodes]);
+      {timeout, Timer, Alias} ->
+         unalias(Alias),
+         mc_recv_tmo(Reqs, Alias, Replies, BadNodes)
+   end.
+
+mc_recv_tmo([], _Alias, Replies, BadNodes) ->
+   {Replies, BadNodes};
+mc_recv_tmo([[Node|Mon] | RestReqs], Alias, Replies, BadNodes) ->
+   erlang:demonitor(Mon),
+   receive
+      {[[alias|Alias]|Mon], Reply} ->
+         mc_recv_tmo(RestReqs, Alias, [{Node,Reply}|Replies], BadNodes);
+      {Alias, Mon, process, _, _} ->
+         mc_recv_tmo(RestReqs, Alias, Replies, [Node|BadNodes])
+   after
+      0 ->
+         mc_recv_tmo(RestReqs, Alias, Replies, [Node|BadNodes])
+   end.
+
+mc_cancel_timer(undefined, _Alias) ->
+   ok;
+mc_cancel_timer(Timer, Alias) ->
+   case erlang:cancel_timer(Timer) of
+      false ->
+         receive
+            {timeout, Timer, Alias} ->
+               ok
+         end;
+      _ ->
+         ok
    end.
 
 -spec cast(ServerRef :: serverRef(), Msg :: term()) -> ok.
@@ -637,143 +734,181 @@ doAbcast(Nodes, Name, Msg) ->
    ],
    ok.
 
--spec send_request(ServerRef :: serverRef(), Request :: term()) -> RequestId :: requestId().
-send_request(Name, Request) ->
-   gen:send_request(Name, '$gen_call', Request).
-
 %% gen_event send_request/3
--spec send_request(ServerRef :: serverRef(), epmHandler(), term()) -> requestId().
+-spec send_request(ServerRef :: serverRef(), epmHandler(), term()) -> request_id().
 send_request(Name, Handler, Query) ->
-   gen:send_request(Name, self(), {call, Handler, Query}).
+   gen:send_request(Name, self(), {'$epmCall', Handler, Query}).
 
--spec wait_response(RequestId :: requestId()) -> {reply, Reply :: term()} | {error, {term(), serverRef()}}.
-wait_response(RequestId) ->
-   gen:wait_response(RequestId, infinity).
+%% -----------------------------------------------------------------
+%% Send a request to a generic server and return a Key which should be
+%% used with wait_response/2 or check_response/2 to fetch the
+%% result of the request.
 
--spec wait_response(RequestId :: requestId(), timeout()) -> {reply, Reply :: term()} | 'timeout' | {error, {term(), serverRef()}}.
-wait_response(RequestId, Timeout) ->
-   gen:wait_response(RequestId, Timeout).
+-spec send_request(ServerRef::serverRef(), Request::term()) ->
+   ReqId::request_id().
 
--spec receive_response(RequestId :: serverRef()) -> {reply, Reply :: term()} | {error, {term(), serverRef()}}.
-receive_response(RequestId) ->
-   gen:receive_response(RequestId, infinity).
+send_request(ServerRef, Request) ->
+   try
+      gen:send_request(ServerRef, '$gen_call', Request)
+   catch
+      error:badarg ->
+         error(badarg, [ServerRef, Request])
+   end.
 
--spec receive_response(RequestId :: requestId(), timeout()) -> {reply, Reply :: term()} | 'timeout' | {error, {term(), serverRef()}}.
-receive_response(RequestId, Timeout) ->
-   gen:receive_response(RequestId, Timeout).
+-spec send_request(ServerRef::serverRef(),
+   Request::term(),
+   Label::term(),
+   ReqIdCollection::request_id_collection()) ->
+   NewReqIdCollection::request_id_collection().
 
--spec check_response(Msg :: term(), RequestId :: requestId()) ->
-   {reply, Reply :: term()} | 'no_reply' | {error, {term(), serverRef()}}.
-check_response(Msg, RequestId) ->
-   gen:check_response(Msg, RequestId).
+send_request(ServerRef, Request, Label, ReqIdCol) ->
+   try
+      gen:send_request(ServerRef, '$gen_call', Request, Label, ReqIdCol)
+   catch
+      error:badarg ->
+         error(badarg, [ServerRef, Request, Label, ReqIdCol])
+   end.
 
-send_nodes(Nodes, Name, Tag, Request) ->
-   [
-      begin
-         Monitor = start_monitor(Node, Name),
-         try {Name, Node} ! {'$gen_call', {self(), {Tag, Node}}, Request},
-         ok
-         catch _:_ -> ok
-         end,
-         Monitor
-      end || Node <- Nodes, is_atom(Node)
-   ].
+-spec wait_response(ReqId, WaitTime) -> Result when
+   ReqId :: request_id(),
+   WaitTime :: response_timeout(),
+   Response :: {reply, Reply::term()}
+   | {error, {Reason::term(), serverRef()}},
+   Result :: Response | 'timeout'.
 
-rec_nodes(Tag, Nodes, Name, TimerId) ->
-   rec_nodes(Tag, Nodes, Name, [], [], 2000, TimerId).
+wait_response(ReqId, WaitTime) ->
+   try
+      gen:wait_response(ReqId, WaitTime)
+   catch
+      error:badarg ->
+         error(badarg, [ReqId, WaitTime])
+   end.
 
-rec_nodes(Tag, [{N, R} | Tail], Name, BadNodes, Replies, Time, TimerId) ->
-   receive
-      {'DOWN', R, _, _, _} ->
-         rec_nodes(Tag, Tail, Name, [N | BadNodes], Replies, Time, TimerId);
-      {{Tag, N}, Reply} ->
-         erlang:demonitor(R, [flush]),
-         rec_nodes(Tag, Tail, Name, BadNodes,
-            [{N, Reply} | Replies], Time, TimerId);
-      {timeout, TimerId, _} ->
-         erlang:demonitor(R, [flush]),
-         rec_nodes_rest(Tag, Tail, Name, [N | BadNodes], Replies)
-   end;
-rec_nodes(Tag, [N | Tail], Name, BadNodes, Replies, Time, TimerId) ->
-   receive
-      {nodedown, N} ->
-         monitor_node(N, false),
-         rec_nodes(Tag, Tail, Name, [N | BadNodes], Replies, 2000, TimerId);
-      {{Tag, N}, Reply} ->
-         receive {nodedown, N} -> ok after 0 -> ok end,
-         monitor_node(N, false),
-         rec_nodes(Tag, Tail, Name, BadNodes,
-            [{N, Reply} | Replies], 2000, TimerId);
-      {timeout, TimerId, _} ->
-         receive {nodedown, N} -> ok after 0 -> ok end,
-         monitor_node(N, false),
-         rec_nodes_rest(Tag, Tail, Name, [N | BadNodes], Replies)
-   after Time ->
-      case erpc:call(N, erlang, whereis, [Name]) of
-         Pid when is_pid(Pid) ->
-            rec_nodes(Tag, [N | Tail], Name, BadNodes,
-               Replies, infinity, TimerId);
-         _ ->
-            receive {nodedown, N} -> ok after 0 -> ok end,
-            monitor_node(N, false),
-            rec_nodes(Tag, Tail, Name, [N | BadNodes],
-               Replies, 2000, TimerId)
-      end
-   end;
-rec_nodes(_, [], _, BadNodes, Replies, _, TimerId) ->
-   case catch erlang:cancel_timer(TimerId) of
-      false ->
-         receive
-            {timeout, TimerId, _} -> ok
-         after 0 ->
-            ok
-         end;
-      _ ->
-         ok
-   end,
-   {Replies, BadNodes}.
+-spec wait_response(ReqIdCollection, WaitTime, Delete) -> Result when
+   ReqIdCollection :: request_id_collection(),
+   WaitTime :: response_timeout(),
+   Delete :: boolean(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef()}},
+   Result :: {Response,
+      Label::term(),
+      NewReqIdCollection::request_id_collection()} |
+   'no_request' |
+   'timeout'.
 
-rec_nodes_rest(Tag, [{N, R} | Tail], Name, BadNodes, Replies) ->
-   receive
-      {'DOWN', R, _, _, _} ->
-         rec_nodes_rest(Tag, Tail, Name, [N | BadNodes], Replies);
-      {{Tag, N}, Reply} ->
-         erlang:demonitor(R, [flush]),
-         rec_nodes_rest(Tag, Tail, Name, BadNodes, [{N, Reply} | Replies])
-   after 0 ->
-      erlang:demonitor(R, [flush]),
-      rec_nodes_rest(Tag, Tail, Name, [N | BadNodes], Replies)
-   end;
-rec_nodes_rest(Tag, [N | Tail], Name, BadNodes, Replies) ->
-   receive
-      {nodedown, N} ->
-         monitor_node(N, false),
-         rec_nodes_rest(Tag, Tail, Name, [N | BadNodes], Replies);
-      {{Tag, N}, Reply} ->
-         receive {nodedown, N} -> ok after 0 -> ok end,
-         monitor_node(N, false),
-         rec_nodes_rest(Tag, Tail, Name, BadNodes, [{N, Reply} | Replies])
-   after 0 ->
-      receive {nodedown, N} -> ok after 0 -> ok end,
-      monitor_node(N, false),
-      rec_nodes_rest(Tag, Tail, Name, [N | BadNodes], Replies)
-   end;
-rec_nodes_rest(_Tag, [], _Name, BadNodes, Replies) ->
-   {Replies, BadNodes}.
+wait_response(ReqIdCol, WaitTime, Delete) ->
+   try
+      gen:wait_response(ReqIdCol, WaitTime, Delete)
+   catch
+      error:badarg ->
+         error(badarg, [ReqIdCol, WaitTime, Delete])
+   end.
 
-start_monitor(Node, Name) when is_atom(Node), is_atom(Name) ->
-   if node() =:= nonode@nohost, Node =/= nonode@nohost ->
-      Ref = make_ref(),
-      self() ! {'DOWN', Ref, process, {Name, Node}, noconnection},
-      {Node, Ref};
-      true ->
-         case catch erlang:monitor(process, {Name, Node}) of
-            {'EXIT', _} ->
-               monitor_node(Node, true),
-               Node;
-            Ref when is_reference(Ref) ->
-               {Node, Ref}
-         end
+-spec receive_response(ReqId, Timeout) -> Result when
+   ReqId :: request_id(),
+   Timeout :: response_timeout(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef()}},
+   Result :: Response | 'timeout'.
+
+receive_response(ReqId, Timeout) ->
+   try
+      gen:receive_response(ReqId, Timeout)
+   catch
+      error:badarg ->
+         error(badarg, [ReqId, Timeout])
+   end.
+
+-spec receive_response(ReqIdCollection, Timeout, Delete) -> Result when
+   ReqIdCollection :: request_id_collection(),
+   Timeout :: response_timeout(),
+   Delete :: boolean(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef()}},
+   Result :: {Response,
+      Label::term(),
+      NewReqIdCollection::request_id_collection()} |
+   'no_request' |
+   'timeout'.
+
+receive_response(ReqIdCol, Timeout, Delete) ->
+   try
+      gen:receive_response(ReqIdCol, Timeout, Delete)
+   catch
+      error:badarg ->
+         error(badarg, [ReqIdCol, Timeout, Delete])
+   end.
+
+-spec check_response(Msg, ReqId) -> Result when
+   Msg :: term(),
+   ReqId :: request_id(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef()}},
+   Result :: Response | 'no_reply'.
+
+check_response(Msg, ReqId) ->
+   try
+      gen:check_response(Msg, ReqId)
+   catch
+      error:badarg ->
+         error(badarg, [Msg, ReqId])
+   end.
+
+-spec check_response(Msg, ReqIdCollection, Delete) -> Result when
+   Msg :: term(),
+   ReqIdCollection :: request_id_collection(),
+   Delete :: boolean(),
+   Response :: {reply, Reply::term()} |
+   {error, {Reason::term(), serverRef()}},
+   Result :: {Response,
+      Label::term(),
+      NewReqIdCollection::request_id_collection()} |
+   'no_request' |
+   'no_reply'.
+
+check_response(Msg, ReqIdCol, Delete) ->
+   try
+      gen:check_response(Msg, ReqIdCol, Delete)
+   catch
+      error:badarg ->
+         error(badarg, [Msg, ReqIdCol, Delete])
+   end.
+
+-spec reqids_new() ->
+   NewReqIdCollection::request_id_collection().
+
+reqids_new() ->
+   gen:reqids_new().
+
+-spec reqids_size(ReqIdCollection::request_id_collection()) ->
+   non_neg_integer().
+
+reqids_size(ReqIdCollection) ->
+   try
+      gen:reqids_size(ReqIdCollection)
+   catch
+      error:badarg -> error(badarg, [ReqIdCollection])
+   end.
+
+-spec reqids_add(ReqId::request_id(), Label::term(),
+   ReqIdCollection::request_id_collection()) ->
+   NewReqIdCollection::request_id_collection().
+
+reqids_add(ReqId, Label, ReqIdCollection) ->
+   try
+      gen:reqids_add(ReqId, Label, ReqIdCollection)
+   catch
+      error:badarg -> error(badarg, [ReqId, Label, ReqIdCollection])
+   end.
+
+-spec reqids_to_list(ReqIdCollection::request_id_collection()) ->
+   [{ReqId::request_id(), Label::term()}].
+
+reqids_to_list(ReqIdCollection) ->
+   try
+      gen:reqids_to_list(ReqIdCollection)
+   catch
+      error:badarg -> error(badarg, [ReqIdCollection])
    end.
 
 %% Reply from a status machine callback to whom awaits in call/2
@@ -1105,237 +1240,239 @@ listify(Item) ->
    [Item].
 %%%==========================================================================
 %%% Internal callbacks
-wakeupFromHib(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib) ->
+wakeupFromHib(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug) ->
    %% 这是一条新消息，唤醒了我们，因此我们必须立即收到它
-   receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib).
+   receiveIng(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, true).
 
 %%%==========================================================================
 %% Entry point for system_continue/3
-reLoopEntry(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib) ->
+reLoopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib) ->
    if
       IsHib ->
-         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib]);
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug]);
       true ->
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib)
+         receiveIng(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, false)
    end.
 
 %% 接收新的消息
-receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib) ->
+receiveIng(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib) ->
    receive
       Msg ->
          case Msg of
             {'$gen_call', From, Request} ->
-               matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request);
+               matchCallMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request);
             {'$gen_cast', Cast} ->
-               matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Cast);
+               matchCastMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Cast);
             {timeout, TimerRef, TimeoutType} ->
                case Timers of
                   #{TimeoutType := {TimerRef, TimeoutMsg}} ->
                      NewTimers = maps:remove(TimeoutType, Timers),
-                     matchTimeoutMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, Debug, TimeoutType, TimeoutMsg);
+                     matchTimeoutMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, Debug, TimeoutType, TimeoutMsg);
                   _ ->
-                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
+                     matchInfoMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
                end;
             {system, PidFrom, Request} ->
                %% 不返回但尾递归调用 system_continue/3
-               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}, IsHib);
+               sys:handle_system_msg(Request, PidFrom, Parent, ?MODULE, Debug, {Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, IsHib}, IsHib);
             {'EXIT', PidFrom, Reason} ->
                case Parent =:= PidFrom of
                   true ->
                      terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, []);
                   _ ->
                      NewEpmHers = epmStopOne(PidFrom, EpmHers),
-                     matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
+                     matchInfoMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
                end;
             {'$epm_call', From, Request} ->
-               matchEpmCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request);
+               matchEpmCallMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request);
             {'$epm_info', CmdOrEmpHandler, Event} ->
-               matchEpmInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, CmdOrEmpHandler, Event);
+               matchEpmInfoMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, CmdOrEmpHandler, Event);
             _ ->
-               matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
+               matchInfoMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg)
          end
    after
       HibernateAfterTimeout ->
-         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib])
+         proc_lib:hibernate(?MODULE, wakeupFromHib, [Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug])
    end.
 
-matchCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request) ->
+matchCallMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request) ->
    CurEvent = {{call, From}, Request},
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, CurEvent, CurStatus}),
+   ?SYS_DEBUG(Debug, Name, {in, CurEvent, CurStatus}),
    try Module:handleCall(Request, CurStatus, CurState, From) of
       Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, From)
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Result, ?CB_FORM_EVENT, From)
    catch
       throw:Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, From);
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Result, ?CB_FORM_EVENT, From);
       Class:Reason:Strace ->
-         terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
+         try_greply(From, {error, {inner_error, {Class, Reason, Strace}}}),
+         innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Class, Reason, Strace)
    end.
 
-matchCastMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Cast) ->
+matchCastMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Cast) ->
    CurEvent = {cast, Cast},
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, CurEvent, CurStatus}),
+   ?SYS_DEBUG(Debug, Name, {in, CurEvent, CurStatus}),
    try Module:handleCast(Cast, CurStatus, CurState) of
       Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false)
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Result, ?CB_FORM_EVENT, false)
    catch
       throw:Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false);
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Result, ?CB_FORM_EVENT, false);
       Class:Reason:Strace ->
-         terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
+         innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Class, Reason, Strace)
    end.
 
-matchInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg) ->
+matchInfoMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Msg) ->
    CurEvent = {info, Msg},
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, CurEvent, CurStatus}),
+   ?SYS_DEBUG(Debug, Name, {in, CurEvent, CurStatus}),
    try Module:handleInfo(Msg, CurStatus, CurState) of
       Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false)
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Result, ?CB_FORM_EVENT, false)
    catch
       throw:Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false);
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Result, ?CB_FORM_EVENT, false);
       Class:Reason:Strace ->
-         terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
+         innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Class, Reason, Strace)
    end.
 
-matchTimeoutMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, TimeoutType, TimeoutMsg) ->
+matchTimeoutMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, TimeoutType, TimeoutMsg) ->
    CurEvent = {TimeoutType, TimeoutMsg},
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, CurEvent, CurStatus}),
+   ?SYS_DEBUG(Debug, Name, {in, CurEvent, CurStatus}),
    try Module:handleOnevent(TimeoutType, TimeoutMsg, CurStatus, CurState) of
       Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false)
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Result, ?CB_FORM_EVENT, false)
    catch
       throw:Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent], Result, ?CB_FORM_EVENT, false);
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Result, ?CB_FORM_EVENT, false);
       Class:Reason:Strace ->
-         terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [CurEvent])
+         innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [CurEvent], Class, Reason, Strace)
    end.
 
-matchEpmCallMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request) ->
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, Request, CurStatus}),
+matchEpmCallMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, From, Request) ->
+   ?SYS_DEBUG(Debug, Name, {in, Request, CurStatus}),
    case Request of
       '$which_handlers' ->
          reply(From, EpmHers);
       {'$addEpm', EpmHandler, Args} ->
          {Reply, NewEpmHers, IsHib} = doAddEpm(EpmHers, EpmHandler, Args, undefined),
          reply(From, Reply),
-         reLoopEntry(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib);
       {'$addSupEpm', EpmHandler, Args, EpmSup} ->
          {Reply, NewEpmHers, IsHib} = doAddSupEpm(EpmHers, EpmHandler, Args, EpmSup),
          reply(From, Reply),
-         reLoopEntry(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib);
       {'$delEpm', EpmHandler, Args} ->
          {Reply, NewEpmHers} = doDelEpm(EpmHers, EpmHandler, Args),
          reply(From, Reply),
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, false);
+         receiveIng(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, false);
       {'$swapEpm', EpmId1, Args1, EpmId2, Args2} ->
          {Reply, NewEpmHers, IsHib} = doSwapEpm(EpmHers, EpmId1, Args1, EpmId2, Args2),
          reply(From, Reply),
-         reLoopEntry(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib);
       {'$swapSupEpm', EpmId1, Args1, EpmId2, Args2, SupPid} ->
          {Reply, NewEpmHers, IsHib} = doSwapSupEpm(EpmHers, EpmId1, Args1, EpmId2, Args2, SupPid),
          reply(From, Reply),
-         reLoopEntry(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, IsHib);
+         reLoopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib);
       {'$syncNotify', Event} ->
          {NewEpmHers, IsHib} = doNotify(EpmHers, handleEvent, Event, false),
          reply(From, ok),
-         startEpmCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, handleEpmEvent, Request, IsHib);
+         startEpmCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, handleEpmEvent, Request, IsHib);
       {'$epmCall', EpmHandler, Query} ->
          {NewEpmHers, IsHib} = doEpmHandle(EpmHers, EpmHandler, handleCall, Query, From),
-         startEpmCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, handleEpmCall, Request, IsHib)
+         startEpmCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, handleEpmCall, Request, IsHib)
    end.
 
-matchEpmInfoMsg(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, CmdOrEmpHandler, Event) ->
-   NewDebug = ?SYS_DEBUG(Debug, Name, {in, {CmdOrEmpHandler, Event}, CurStatus}),
+matchEpmInfoMsg(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, CmdOrEmpHandler, Event) ->
+   ?SYS_DEBUG(Debug, Name, {in, {CmdOrEmpHandler, Event}, CurStatus}),
    case CmdOrEmpHandler of
       '$infoNotify' ->
          {NewEpmHers, IsHib} = doNotify(EpmHers, handleEvent, Event, false),
-         startEpmCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, handleEpmEvent, Event, IsHib);
+         startEpmCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, handleEpmEvent, Event, IsHib);
       EpmHandler ->
          {NewEpmHers, IsHib} = doEpmHandle(EpmHers, EpmHandler, handleInfo, Event, false),
-         startEpmCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, handleEpmInfo, Event, IsHib)
+         startEpmCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, NewEpmHers, Postponed, Timers, CurStatus, CurState, Debug, handleEpmInfo, Event, IsHib)
    end.
 
-startEpmCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, CallbackFun, Event, IsHib) ->
+startEpmCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, CallbackFun, Event, IsHib) ->
    case erlang:function_exported(Module, CallbackFun, 3) of
       true ->
-         NewDebug = ?SYS_DEBUG(Debug, Name, {in, Event, CurStatus}),
+         ?SYS_DEBUG(Debug, Name, {in, Event, CurStatus}),
          try Module:CallbackFun(Event, CurStatus, CurState) of
             Result ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [Event], Result, ?CB_FORM_EVENT, false)
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [Event], Result, ?CB_FORM_EVENT, false)
          catch
             throw:Ret ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [Event], Ret, ?CB_FORM_EVENT, false);
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [Event], Ret, ?CB_FORM_EVENT, false);
             Class:Reason:Strace ->
-               terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, [Event])
+               innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [Event], Class, Reason, Strace)
          end;
       _ ->
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib)
+         reLoopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib)
    end.
 
-startEnterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter) ->
+startEnterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter) ->
    try Module:handleEnter(PrevStatus, CurStatus, CurState) of
       Result ->
-         handleEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, Result)
+         handleEnterCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, Result)
    catch
       throw:Result ->
-         handleEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, Result);
+         handleEnterCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, Result);
       Class:Reason:Strace ->
-         terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+         innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Class, Reason, Strace)
    end.
 
-startAfterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Args) ->
+startAfterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Args) ->
    try Module:handleAfter(Args, CurStatus, CurState) of
       Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_AFTER, false)
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_AFTER, false)
    catch
       throw:Result ->
-         handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_AFTER, false);
+         handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_AFTER, false);
       Class:Reason:Strace ->
-         terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+         innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, {doAfter, Args}, Class, Reason, Strace)
    end.
 
-startEventCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, {Type, Content}) ->
+startEventCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, {Type, Content}) ->
    case Type of
       'cast' ->
          try Module:handleCast(Content, CurStatus, CurState) of
             Result ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
          catch
             throw:Ret ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
             Class:Reason:Strace ->
-               terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+               innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, {Type, Content}, Class, Reason, Strace)
          end;
       'info' ->
          try Module:handleInfo(Content, CurStatus, CurState) of
             Result ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
          catch
             throw:Ret ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
             Class:Reason:Strace ->
-               terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+               innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, {Type, Content}, Class, Reason, Strace)
          end;
       {'call', From} ->
          try Module:handleCall(Content, CurStatus, CurState, From) of
             Result ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, From)
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, From)
          catch
             throw:Ret ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, From);
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, From);
             Class:Reason:Strace ->
-               terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+               try_greply(From, {error, {inner_error, {Class, Reason, Strace}}}),
+               innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, {Type, Content}, Class, Reason, Strace)
          end;
       _ ->
          try Module:handleOnevent(Type, Content, CurStatus, CurState) of
             Result ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, ?CB_FORM_EVENT, false)
          catch
             throw:Ret ->
-               handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
+               handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Ret, ?CB_FORM_EVENT, false);
             Class:Reason:Strace ->
-               terminate(Class, Reason, Strace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+               innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, {Type, Content}, Class, Reason, Strace)
          end
    end.
 
@@ -1399,24 +1536,24 @@ handleEpmCR(Result, EpmHers, #epmHer{epmId = EpmId} = EpmHer, Event, From) ->
    end.
 
 %% handleEnterCallbackRet
-handleEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, Result) ->
+handleEnterCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, Result) ->
    case Result of
       {kpS, NewState} ->
-         dealEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, NewState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, false);
+         dealEnterCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, NewState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, false);
       {kpS, NewState, Actions} ->
-         parseEnterAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, NewState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, false, listify(Actions));
+         parseEnterAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, NewState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, false, listify(Actions));
       kpS_S ->
-         dealEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, false);
+         dealEnterCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, false);
       {kpS_S, Actions} ->
-         parseEnterAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, false, listify(Actions));
+         parseEnterAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, false, listify(Actions));
       {reS, NewState} ->
-         dealEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, NewState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, true);
+         dealEnterCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, NewState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, true);
       {reS, NewState, Actions} ->
-         parseEnterAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, NewState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, true, listify(Actions));
+         parseEnterAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, NewState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, true, listify(Actions));
       reS_S ->
-         dealEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, true);
+         dealEnterCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, true);
       {reS_S, Actions} ->
-         parseEnterAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, true, listify(Actions));
+         parseEnterAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, PrevStatus, CurState, CurStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, true, listify(Actions));
       stop ->
          terminate(exit, normal, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents);
       {stop, Reason} ->
@@ -1424,9 +1561,9 @@ handleEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Pos
       {stop, Reason, NewState} ->
          terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, LeftEvents);
       {stopReply, Reason, Replies} ->
-         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Replies}),
+         ?SYS_DEBUG(Debug, Name, {out, Replies}),
          try
-            terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, LeftEvents)
+            terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
          after
             case Replies of
                {reply, RFrom, Reply} ->
@@ -1437,9 +1574,9 @@ handleEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Pos
             end
          end;
       {stopReply, Reason, Replies, NewState} ->
-         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Replies}),
+         ?SYS_DEBUG(Debug, Name, {out, Replies}),
          try
-            terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewDebug, LeftEvents)
+            terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, LeftEvents)
          after
             case Replies of
                {reply, RFrom, Reply} ->
@@ -1450,65 +1587,65 @@ handleEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Pos
             end
          end;
       _ ->
-         terminate(error, {bad_handleEnterCR, Result}, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+         innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, error, {bad_handleEnterCR, Result}, ?STACKTRACE())
    end.
 
-handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, CallbackForm, From) ->
+handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Result, CallbackForm, From) ->
    case Result of
       {noreply, NewState} ->
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, false);
+         receiveIng(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, false);
       {noreply, NewState, Option} ->
          case Option of
             hibernate ->
-               reLoopEntry(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, true);
+               reLoopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, true);
             {doAfter, Args} ->
-               startAfterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, [], Args);
+               startAfterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, [], Args);
             _Ret ->
-               terminate(error, {bad_noreply, _Ret}, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, [])
+               innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, error, {bad_noreply, _Ret}, ?STACKTRACE())
          end;
       {reply, Reply, NewState} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
-         receiveIng(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewDebug, false);
+         ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
+         receiveIng(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, false);
       {reply, Reply, NewState, Option} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
+         ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
          case Option of
             hibernate ->
-               reLoopEntry(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewDebug, true);
+               reLoopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, true);
             {doAfter, Args} ->
-               startAfterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewDebug, [], Args);
+               startAfterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, [], Args);
             _Ret ->
-               terminate(error, {bad_reply, _Ret}, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, [])
+               innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, error, {bad_reply, _Ret}, ?STACKTRACE())
          end;
       {sreply, Reply, NewStatus, NewState} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
-         dealEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus);
+         ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
+         dealEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus);
       {sreply, Reply, NewStatus, NewState, Actions} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
-         parseEventAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewStatus, NewDebug, LeftEvents, NewStatus =/= CurStatus, listify(Actions), CallbackForm);
+         ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
+         parseEventAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus, listify(Actions), CallbackForm);
       {nextS, NewStatus, NewState} ->
-         dealEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus);
+         dealEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus);
       {nextS, NewStatus, NewState, Actions} ->
-         parseEventAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus, listify(Actions), CallbackForm);
+         parseEventAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewStatus, Debug, LeftEvents, NewStatus =/= CurStatus, listify(Actions), CallbackForm);
       {kpS, NewState} ->
-         dealEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, CurStatus, Debug, LeftEvents, false);
+         dealEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, CurStatus, Debug, LeftEvents, false);
       {kpS, NewState, Actions} ->
-         parseEventAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, CurStatus, Debug, LeftEvents, false, listify(Actions), CallbackForm);
+         parseEventAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, CurStatus, Debug, LeftEvents, false, listify(Actions), CallbackForm);
       kpS_S ->
-         dealEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, CurStatus, Debug, LeftEvents, false);
+         dealEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, CurStatus, Debug, LeftEvents, false);
       {kpS_S, Actions} ->
-         parseEventAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, CurStatus, Debug, LeftEvents, false, listify(Actions), CallbackForm);
+         parseEventAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, CurStatus, Debug, LeftEvents, false, listify(Actions), CallbackForm);
       {reS, NewState} ->
-         dealEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, CurStatus, Debug, LeftEvents, true);
+         dealEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, CurStatus, Debug, LeftEvents, true);
       {reS, NewState, Actions} ->
-         parseEventAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, CurStatus, Debug, LeftEvents, true, listify(Actions), CallbackForm);
+         parseEventAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, CurStatus, Debug, LeftEvents, true, listify(Actions), CallbackForm);
       reS_S ->
-         dealEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, CurStatus, Debug, LeftEvents, true);
+         dealEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, CurStatus, Debug, LeftEvents, true);
       {reS_S, Actions} ->
-         parseEventAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, CurStatus, Debug, LeftEvents, true, listify(Actions), CallbackForm);
+         parseEventAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, CurStatus, Debug, LeftEvents, true, listify(Actions), CallbackForm);
       stop ->
          terminate(exit, normal, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents);
       {stop, Reason} ->
@@ -1516,9 +1653,9 @@ handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Pos
       {stop, Reason, NewState} ->
          terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, LeftEvents);
       {stopReply, Reason, Replies} ->
-         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Replies}),
+         ?SYS_DEBUG(Debug, Name, {out, Replies}),
          try
-            terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewDebug, LeftEvents)
+            terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
          after
             case Replies of
                {reply, RFrom, Reply} ->
@@ -1531,9 +1668,9 @@ handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Pos
             end
          end;
       {stopReply, Reason, Replies, NewState} ->
-         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Replies}),
+         ?SYS_DEBUG(Debug, Name, {out, Replies}),
          try
-            terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, NewDebug, LeftEvents)
+            terminate(exit, Reason, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, NewState, Debug, LeftEvents)
          after
             case Replies of
                {reply, RFrom, Reply} ->
@@ -1546,77 +1683,77 @@ handleEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Pos
             end
          end;
       _ ->
-         terminate(error, {bad_handleEventCR, Result}, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents)
+         innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, error, {bad_handleEventCR, Result}, ?STACKTRACE())
    end.
 
-dealEnterCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, IsCallEnter) ->
+dealEnterCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter, IsCallEnter) ->
    NewTimers = cancelESTimeout(CurStatus =:= NewStatus, Timers),
    case IsEnter andalso IsCallEnter of
       true ->
-         startEnterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter);
+         startEnterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter);
       false ->
-         performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter)
+         performTransitions(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter)
    end.
 
 %% dealEventCallbackRet
-dealEventCR(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, LeftEvents, IsCallEnter) ->
+dealEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, LeftEvents, IsCallEnter) ->
    NewTimers = cancelESTimeout(CurStatus =:= NewStatus, Timers),
    case IsEnter andalso IsCallEnter of
       true ->
-         startEnterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], false, false, false);
+         startEnterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], false, false, false);
       false ->
-         performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], false, false, false)
+         performTransitions(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], false, false, false)
    end.
 
 %% 处理enter callback 动作列表
 %% parseEnterActionsList
-parseEnterAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsCallEnter, IsHib, DoAfter, Actions) ->
+parseEnterAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsCallEnter, IsHib, DoAfter, Actions) ->
    NewTimers = cancelESTimeout(CurStatus =:= NewStatus, Timers),
    %% enter 调用不能改成状态 actions 不能返回 IsPos = true 但是可以取消之前的推迟  设置IsPos = false 不能设置 doafter 不能插入事件
    case Actions of
       [] ->
          case IsEnter andalso IsCallEnter of
             true ->
-               startEnterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter);
+               startEnterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter);
             _ ->
-               performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter)
+               performTransitions(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NextEs, IsPos, IsHib, DoAfter)
          end;
       _ ->
          case doParseAL(Actions, ?CB_FORM_ENTER, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs) of
             {error, ErrorContent} ->
-               terminate(error, ErrorContent, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, Debug, LeftEvents);
-            {NewIsEnter, NNewTimers, NewDebug, NewIsPos, NewIsHib, DoAfter, NewNextEs} ->
+               innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Actions, error, ErrorContent, ?STACKTRACE());
+            {NewIsEnter, NNewTimers, Debug, NewIsPos, NewIsHib, DoAfter, NewNextEs} ->
                case NewIsEnter andalso IsCallEnter of
                   true ->
-                     startEnterCall(Parent, Name, Module, HibernateAfterTimeout, NewIsEnter, EpmHers, Postponed, NNewTimers, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewNextEs, NewIsPos, NewIsHib, DoAfter);
+                     startEnterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, NewIsEnter, EpmHers, Postponed, NNewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NewNextEs, NewIsPos, NewIsHib, DoAfter);
                   _ ->
-                     performTransitions(Parent, Name, Module, HibernateAfterTimeout, NewIsEnter, EpmHers, Postponed, NNewTimers, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewNextEs, NewIsPos, NewIsHib, DoAfter)
+                     performTransitions(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, NewIsEnter, EpmHers, Postponed, NNewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NewNextEs, NewIsPos, NewIsHib, DoAfter)
                end
          end
    end.
 
 %% 处理非 enter 或者after callback 返回的动作列表
 %% parseEventActionsList
-parseEventAL(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, LeftEvents, IsCallEnter, Actions, CallbackForm) ->
+parseEventAL(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, LeftEvents, IsCallEnter, Actions, CallbackForm) ->
    NewTimers = cancelESTimeout(CurStatus =:= NewStatus, Timers),
    case Actions of
       [] ->
          case IsEnter andalso IsCallEnter of
             true ->
-               startEnterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], false, false, false);
+               startEnterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], false, false, false);
             _ ->
-               performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], false, false, false)
+               performTransitions(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, [], false, false, false)
          end;
       _ ->
          case doParseAL(Actions, CallbackForm, Name, IsEnter, NewTimers, Debug, false, false, false, []) of
             {error, ErrorContent} ->
-               terminate(error, ErrorContent, ?STACKTRACE(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, []);
-            {NewIsEnter, NNewTimers, NewDebug, NewIsPos, NewIsHib, MewDoAfter, NewNextEs} ->
+               innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, Actions, error, ErrorContent, ?STACKTRACE());
+            {NewIsEnter, NNewTimers, Debug, NewIsPos, NewIsHib, MewDoAfter, NewNextEs} ->
                case NewIsEnter andalso IsCallEnter of
                   true ->
-                     startEnterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NNewTimers, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewNextEs, NewIsPos, NewIsHib, MewDoAfter);
+                     startEnterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NNewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NewNextEs, NewIsPos, NewIsHib, MewDoAfter);
                   _ ->
-                     performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NNewTimers, CurStatus, CurState, NewStatus, NewDebug, LeftEvents, NewNextEs, NewIsPos, NewIsHib, MewDoAfter)
+                     performTransitions(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, NNewTimers, CurStatus, CurState, NewStatus, Debug, LeftEvents, NewNextEs, NewIsPos, NewIsHib, MewDoAfter)
                end
          end
    end.
@@ -1628,8 +1765,8 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
    case OneAction of
       {reply, From, Reply} ->
          reply(From, Reply),
-         NewDebug = ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
-         doParseAL(LeftActions, CallbackForm, Name, IsEnter, Timers, NewDebug, IsPos, IsHib, DoAfter, NextEs);
+         ?SYS_DEBUG(Debug, Name, {out, Reply, From}),
+         doParseAL(LeftActions, CallbackForm, Name, IsEnter, Timers, Debug, IsPos, IsHib, DoAfter, NextEs);
       {eTimeout, Time, TimeoutMsg} ->
          case Time of
             infinity ->
@@ -1637,9 +1774,9 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
                doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs);
             _ ->
                TimerRef = erlang:start_timer(Time, self(), eTimeout),
-               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {eTimeout, Time, TimeoutMsg, []}}),
+               ?SYS_DEBUG(Debug, Name, {start_timer, {eTimeout, Time, TimeoutMsg, []}}),
                NewTimers = doRegisterTimer(eTimeout, TimerRef, TimeoutMsg, Timers),
-               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, NewDebug, IsPos, IsHib, DoAfter, NextEs)
+               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs)
          end;
       {sTimeout, Time, TimeoutMsg} ->
          case Time of
@@ -1648,9 +1785,9 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
                doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs);
             _ ->
                TimerRef = erlang:start_timer(Time, self(), sTimeout),
-               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {sTimeout, Time, TimeoutMsg, []}}),
+               ?SYS_DEBUG(Debug, Name, {start_timer, {sTimeout, Time, TimeoutMsg, []}}),
                NewTimers = doRegisterTimer(sTimeout, TimerRef, TimeoutMsg, Timers),
-               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, NewDebug, IsPos, IsHib, DoAfter, NextEs)
+               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs)
          end;
       {gTimeout, TimeoutName, Time, TimeoutMsg} ->
          case Time of
@@ -1659,9 +1796,9 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
                doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs);
             _ ->
                TimerRef = erlang:start_timer(Time, self(), TimeoutName),
-               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {TimeoutName, Time, TimeoutMsg, []}}),
+               ?SYS_DEBUG(Debug, Name, {start_timer, {TimeoutName, Time, TimeoutMsg, []}}),
                NewTimers = doRegisterTimer(TimeoutName, TimerRef, TimeoutMsg, Timers),
-               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, NewDebug, IsPos, IsHib, DoAfter, NextEs)
+               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs)
          end;
       {eTimeout, Time, TimeoutMsg, Options} ->
          case Time of
@@ -1670,9 +1807,9 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
                doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs);
             _ ->
                TimerRef = erlang:start_timer(Time, self(), eTimeout, Options),
-               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {eTimeout, Time, TimeoutMsg, Options}}),
+               ?SYS_DEBUG(Debug, Name, {start_timer, {eTimeout, Time, TimeoutMsg, Options}}),
                NewTimers = doRegisterTimer(eTimeout, TimerRef, TimeoutMsg, Timers),
-               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, NewDebug, IsPos, IsHib, DoAfter, NextEs)
+               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs)
          end;
       {sTimeout, Time, TimeoutMsg, Options} ->
          case Time of
@@ -1681,9 +1818,9 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
                doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs);
             _ ->
                TimerRef = erlang:start_timer(Time, self(), sTimeout, Options),
-               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {sTimeout, Time, TimeoutMsg, Options}}),
+               ?SYS_DEBUG(Debug, Name, {start_timer, {sTimeout, Time, TimeoutMsg, Options}}),
                NewTimers = doRegisterTimer(sTimeout, TimerRef, TimeoutMsg, Timers),
-               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, NewDebug, IsPos, IsHib, DoAfter, NextEs)
+               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs)
          end;
       {gTimeout, TimeoutName, Time, TimeoutMsg, Options} ->
          case Time of
@@ -1692,9 +1829,9 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
                doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs);
             _ ->
                TimerRef = erlang:start_timer(Time, self(), TimeoutName, Options),
-               NewDebug = ?SYS_DEBUG(Debug, Name, {start_timer, {TimeoutName, Time, TimeoutMsg, Options}}),
+               ?SYS_DEBUG(Debug, Name, {start_timer, {TimeoutName, Time, TimeoutMsg, Options}}),
                NewTimers = doRegisterTimer(TimeoutName, TimerRef, TimeoutMsg, Timers),
-               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, NewDebug, IsPos, IsHib, DoAfter, NextEs)
+               doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs)
          end;
       {u_eTimeout, NewTimeoutMsg} ->
          NewTimers = doUpdateTimer(eTimeout, NewTimeoutMsg, Timers),
@@ -1715,8 +1852,8 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
          NewTimers = doCancelTimer(TimeoutName, Timers),
          doParseAL(LeftActions, CallbackForm, Name, IsEnter, NewTimers, Debug, IsPos, IsHib, DoAfter, NextEs);
       {isEnter, NewIsEnter} ->
-         NewDebug = ?SYS_DEBUG(Debug, Name, {change_isEnter, NewIsEnter}),
-         doParseAL(LeftActions, CallbackForm, Name, Timers, NewIsEnter, NewDebug, IsPos, IsHib, DoAfter, NextEs);
+         ?SYS_DEBUG(Debug, Name, {change_isEnter, NewIsEnter}),
+         doParseAL(LeftActions, CallbackForm, Name, Timers, NewIsEnter, Debug, IsPos, IsHib, DoAfter, NextEs);
       {isHib, NewIsHib} ->
          doParseAL(LeftActions, CallbackForm, Name, IsEnter, Timers, Debug, IsPos, NewIsHib, DoAfter, NextEs);
       {isPos, NewIsPos} when (not NewIsPos orelse CallbackForm == ?CB_FORM_EVENT) ->
@@ -1744,7 +1881,7 @@ doParseAL([OneAction | LeftActions], CallbackForm, Name, IsEnter, Timers, Debug,
 %    end.
 
 %% 进行状态转换
-performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, AllLeftEvents, NextEs, IsPos, IsHib, DoAfter) ->
+performTransitions(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, NewStatus, Debug, AllLeftEvents, NextEs, IsPos, IsHib, DoAfter) ->
    %% 已收集所有选项，并缓冲next_events。执行实际状态转换。如果推迟则将当前事件移至推迟
    %% 此时 NextEs的顺序与最开始出现的顺序相反. 后面执行的顺序 当前新增事件 + 反序的Postpone事件 + LeftEvents
    case AllLeftEvents of
@@ -1755,7 +1892,7 @@ performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers
          [CurEvent | LeftEvents] = AllLeftEvents
    end,
 
-   NewDebug = ?SYS_DEBUG(Debug, Name, case IsPos of true -> {postpone, CurEvent, CurStatus, NewStatus}; _ -> {consume, CurEvent, CurStatus, NewStatus} end),
+   ?SYS_DEBUG(Debug, Name, case IsPos of true -> {postpone, CurEvent, CurStatus, NewStatus}; _ -> {consume, CurEvent, CurStatus, NewStatus} end),
    if
       CurStatus =:= NewStatus ->
          %% Cancel event timeout
@@ -1772,7 +1909,7 @@ performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers
                      _ ->
                         lists:reverse(NextEs, LeftEvents)
                   end,
-               performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, [CurEvent | Postponed], Timers, NewStatus, CurState, NewDebug, LastLeftEvents, IsHib, DoAfter);
+               performEvents(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, [CurEvent | Postponed], Timers, NewStatus, CurState, Debug, LastLeftEvents, IsHib, DoAfter);
             true ->
                LastLeftEvents =
                   case NextEs of
@@ -1785,7 +1922,7 @@ performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers
                      _ ->
                         lists:reverse(NextEs, LeftEvents)
                   end,
-               performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, NewStatus, CurState, NewDebug, LastLeftEvents, IsHib, DoAfter)
+               performEvents(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, NewStatus, CurState, Debug, LastLeftEvents, IsHib, DoAfter)
          end;
       true ->
          %% 状态发生改变 重试推迟的事件
@@ -1813,7 +1950,7 @@ performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers
                      _ ->
                         lists:reverse(NextEs, NewLeftEvents)
                   end,
-               performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, [], Timers, NewStatus, CurState, NewDebug, LastLeftEvents, IsHib, DoAfter);
+               performEvents(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, [], Timers, NewStatus, CurState, Debug, LastLeftEvents, IsHib, DoAfter);
             true ->
                NewLeftEvents =
                   case Postponed of
@@ -1837,21 +1974,21 @@ performTransitions(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers
                      _ ->
                         lists:reverse(NextEs, NewLeftEvents)
                   end,
-               performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, [], Timers, NewStatus, CurState, NewDebug, LastLeftEvents, IsHib, DoAfter)
+               performEvents(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, [], Timers, NewStatus, CurState, Debug, LastLeftEvents, IsHib, DoAfter)
          end
    end.
 
 %% 状态转换已完成，如果有排队事件，则继续循环，否则获取新事件
-performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, IsHib, DoAfter) ->
+performEvents(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, IsHib, DoAfter) ->
 %  io:format("loop_done: status_data = ~p ~n postponed = ~p  LeftEvents = ~p ~n timers = ~p.~n", [S#status.status_data,,S#status.postponed,LeftEvents,S#status.timers]),
    case DoAfter of
       {true, Args} ->
          %% 这里 IsHib设置会被丢弃 按照gen_server中的设计 continue 和 hiernate是互斥的
-         startAfterCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Args);
+         startAfterCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Args);
       _ ->
          case LeftEvents of
             [] ->
-               reLoopEntry(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib);
+               reLoopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, IsHib);
             [Event | _Events] ->
                %% 循环直到没有排队事件
                if
@@ -1861,7 +1998,7 @@ performEvents(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Pos
                   true ->
                      ignore
                end,
-               startEventCall(Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Event)
+               startEventCall(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents, Event)
          end
    end.
 
@@ -1964,15 +2101,15 @@ cancelTimer(TimeoutType, TimerRef, Timers) ->
 %%    {Events, Debug};
 %% mergeTimeoutEvents([{eTimeout, _} = TimeoutEvent | TimeoutEvents], Status, CycleData, Debug, []) ->
 %%    %% 由于队列中没有其他事件，因此添加该事件零超时事件
-%%    NewDebug = ?SYS_DEBUG(Debug, CycleData, {insert_timeout, TimeoutEvent, Status}),
-%%    mergeTimeoutEvents(TimeoutEvents, Status, CycleData, NewDebug, [TimeoutEvent]);
+%%    ?SYS_DEBUG(Debug, CycleData, {insert_timeout, TimeoutEvent, Status}),
+%%    mergeTimeoutEvents(TimeoutEvents, Status, CycleData, Debug, [TimeoutEvent]);
 %% mergeTimeoutEvents([{eTimeout, _} | TimeoutEvents], Status, CycleData, Debug, Events) ->
 %%    %% 忽略，因为队列中还有其他事件，因此它们取消了事件超时0。
 %%    mergeTimeoutEvents(TimeoutEvents, Status, CycleData, Debug, Events);
 %% mergeTimeoutEvents([TimeoutEvent | TimeoutEvents], Status, CycleData, Debug, Events) ->
 %%    %% Just prepend all others
-%%    NewDebug = ?SYS_DEBUG(Debug, CycleData, {insert_timeout, TimeoutEvent, Status}),
-%%    mergeTimeoutEvents(TimeoutEvents, Status, CycleData, NewDebug, [TimeoutEvent | Events]).
+%%    ?SYS_DEBUG(Debug, CycleData, {insert_timeout, TimeoutEvent, Status}),
+%%    mergeTimeoutEvents(TimeoutEvents, Status, CycleData, Debug, [TimeoutEvent | Events]).
 
 %% Return a list of all pending timeouts
 listTimeouts(Timers) ->
@@ -1987,6 +2124,28 @@ allTimer(Iterator, Acc) ->
    end.
 
 %%---------------------------------------------------------------------------
+innerError(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, MsgEvent, Class, Reason, Stacktrace) ->
+   case GbhOpts of
+      #gbhOpts{daemon = true} ->
+         error_msg({innerError, {Class, Reason, Stacktrace}}, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, MsgEvent),
+         case erlang:function_exported(Module, handleError, 2) of
+            true ->
+               try Module:handleError({Class, Reason, Stacktrace}, CurState) of
+                  Result ->
+                     handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [MsgEvent], Result, ?CB_FORM_EVENT, false)
+               catch
+                  throw:Result ->
+                     handleEventCR(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, [MsgEvent], Result, ?CB_FORM_EVENT, false);
+                  IClass:IReason:IStrace ->
+                     error_msg({handleError, {IClass, IReason, IStrace}}, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, {Class, Reason, Stacktrace}),
+                     kpS
+               end;
+            false ->
+               kpS
+         end;
+      _ ->
+         terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, MsgEvent)
+   end.
 
 terminate(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents) ->
    epmStopAll(EpmHers),
@@ -2042,6 +2201,29 @@ error_info(Class, Reason, Stacktrace, Parent, Name, Module, HibernateAfterTimeou
          domain => [otp],
          report_cb => fun gen_ipc:format_log/2,
          error_logger => #{tag => error, report_cb => fun gen_ipc:format_log/1}}).
+
+error_msg(Reason, Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState, Debug, LeftEvents) ->
+   Log = sys:get_log(Debug),
+   ?LOG_ERROR(
+      #{
+         label => {gen_ipc, inner_error},
+         name => Name,
+         module => Module,
+         queue => LeftEvents,
+         postponed => Postponed,
+         isEnter => IsEnter,
+         status => format_status(inner_error, get(), Parent, Name, Module, HibernateAfterTimeout, IsEnter, EpmHers, Postponed, Timers, CurStatus, CurState),
+         timeouts => listTimeouts(Timers),
+         log => Log,
+         reason => Reason,
+         client_info => cliStacktrace(LeftEvents)
+      },
+      #{
+         domain => [otp],
+         report_cb => fun gen_ipc:format_log/2,
+         error_logger => #{tag => error, report_cb => fun gen_ipc:format_log/1}}).
+
+
 
 cliStacktrace([]) ->
    undefined;
