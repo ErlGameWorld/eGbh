@@ -382,7 +382,7 @@ init_it(Starter, self, ServerRef, Module, Args, Opts) ->
 init_it(Starter, Parent, ServerRef, Module, Args, Opts) ->
    Name = gen:name(ServerRef),
    Debug = gen:debug_options(Name, Opts),
-   GbhOpts = #gbhOpts{daemon = lists:member(daemon, Opts)},
+   GbhOpts = #gbhOpts{daemon = not lists:member(notDaemon, Opts)},
    HibernateAfterTimeout = gen:hibernate_after(Opts),
    case doModuleInit(Module, Args) of
       {ok, State} ->
@@ -436,7 +436,7 @@ enter_loop(Module, Status, State, Opts, ServerName, Actions) ->
    Parent = gen:get_parent(),
    Name = gen:get_proc_name(ServerName),
    Debug = gen:debug_options(Name, Opts),
-   GbhOpts = #gbhOpts{daemon = lists:member(daemon, Opts)},
+   GbhOpts = #gbhOpts{daemon = not lists:member(notDaemon, Opts)},
    HibernateAfterTimeout = gen:hibernate_after(Opts),
    loopEntry(Parent, Debug, Module, Name, GbhOpts, HibernateAfterTimeout, Status, State, Actions).
 
@@ -1193,10 +1193,8 @@ epm_log(#{label := {gen_ipc, epm_terminate}, handler := Handler, name := SName, 
    "** Was installed in ~tp~n"
    "** Last event was: ~tp~n"
    "** When handler state == ~tp~n"
-   "** Reason == ~tp~n", [Handler, SName, LastIn, State, Reason1]};
-epm_log(#{label := {gen_ipc, no_handle_info}, module := Module, message := Msg}) ->
-   {"** Undefined handle_info in ~tp~n"
-   "** Unhandled message: ~tp~n", [Module, Msg]}.
+   "** Reason == ~tp~n", [Handler, SName, LastIn, State, Reason1]}.
+
 
 epmStopAll(EpmHers) ->
    allStop(iterator(EpmHers)).
@@ -2304,6 +2302,48 @@ limit_report(
       reason =>
       {Class, io_lib:limit_term(Reason, Depth), io_lib:limit_term(Stacktrace, Depth)},
       client_info => limit_client_info(ClientInfo, Depth)
+   };
+limit_report(
+   #{
+      label := {gen_ipc, inner_error},
+      queue := Q,
+      postponed := Postponed,
+      module := Module,
+      status := FmtData,
+      timeouts := Timeouts,
+      log := Log,
+      reason := {Class, Reason, Stacktrace},
+      client_info := ClientInfo
+   } = Report,
+   Depth) ->
+   Report#{
+      queue =>
+      case Q of
+         [Event | Events] ->
+            [io_lib:limit_term(Event, Depth) | io_lib:limit_term(Events, Depth)];
+         _ ->
+            []
+      end,
+      postponed =>
+      case Postponed of
+         [] -> [];
+         _ -> io_lib:limit_term(Postponed, Depth)
+      end,
+      modules => io_lib:limit_term(Module, Depth),
+      status => io_lib:limit_term(FmtData, Depth),
+      timeouts =>
+      case Timeouts of
+         {0, _} -> Timeouts;
+         _ -> io_lib:limit_term(Timeouts, Depth)
+      end,
+      log =>
+      case Log of
+         [] -> [];
+         _ -> [io_lib:limit_term(T, Depth) || T <- Log]
+      end,
+      reason =>
+      {Class, io_lib:limit_term(Reason, Depth), io_lib:limit_term(Stacktrace, Depth)},
+      client_info => limit_client_info(ClientInfo, Depth)
    }.
 
 limit_client_info({Pid, {Name, Stacktrace}}, Depth) ->
@@ -2387,9 +2427,161 @@ format_log_single(
             lists:flatmap(fun(A) -> [A, Depth] end, Args0)
       end,
    {Format ++ ClientFmt, Args ++ ClientArgs};
+format_log_single(
+   #{
+      label := {gen_ipc, inner_error},
+      name := Name,
+      queue := Q,
+      %% postponed
+      %% isEnter
+      status := FmtData,
+      %% timeouts
+      log := Log,
+      reason := {Class, Reason, Stacktrace},
+      client_info := ClientInfo
+   },
+   #{single_line := true, depth := Depth} = FormatOpts) ->
+   P = p(FormatOpts),
+   {FixedReason, FixedStacktrace} = fix_reason(Class, Reason, Stacktrace),
+   {ClientFmt, ClientArgs} = format_client_log_single(ClientInfo, P, Depth),
+   Format =
+      lists:append(
+         ["State machine ", P, " inner_error. Reason: ", P,
+            case FixedStacktrace of
+               [] -> "";
+               _ -> ". Stack: " ++ P
+            end,
+            case Q of
+               [] -> "";
+               _ -> ". Last event: " ++ P
+            end,
+            ". State: ", P,
+            case Log of
+               [] -> "";
+               _ -> ". Log: " ++ P
+            end,
+            "."]
+      ),
+   Args0 =
+      [Name, FixedReason] ++
+      case FixedStacktrace of
+         [] -> [];
+         _ -> [FixedStacktrace]
+      end ++
+      case Q of
+         [] -> [];
+         [Event | _] -> [Event]
+      end ++
+      [FmtData] ++
+      case Log of
+         [] -> [];
+         _ -> [Log]
+      end,
+   Args =
+      case Depth of
+         unlimited ->
+            Args0;
+         _ ->
+            lists:flatmap(fun(A) -> [A, Depth] end, Args0)
+      end,
+   {Format ++ ClientFmt, Args ++ ClientArgs};
 format_log_single(Report, FormatOpts) ->
    format_log_multi(Report, FormatOpts).
 
+format_log_multi(
+   #{
+      label := {gen_ipc, terminate},
+      name := Name,
+      queue := Q,
+      postponed := Postponed,
+      module := Module,
+      isEnter := StateEnter,
+      status := FmtData,
+      timeouts := Timeouts,
+      log := Log,
+      reason := {Class, Reason, Stacktrace},
+      client_info := ClientInfo
+   },
+   #{depth := Depth} = FormatOpts) ->
+   P = p(FormatOpts),
+   {FixedReason, FixedStacktrace} = fix_reason(Class, Reason, Stacktrace),
+   {ClientFmt, ClientArgs} = format_client_log(ClientInfo, P, Depth),
+   CBMode =
+      case StateEnter of
+         true ->
+            [Module, 'isEnter=true'];
+         false ->
+            Module
+      end,
+   Format =
+      lists:append(
+         ["** gen_ipc State machine ", P, " inner_error~n",
+            case Q of
+               [] -> "";
+               _ -> "** Last event = " ++ P ++ "~n"
+            end,
+            "** When server status  = ", P, "~n",
+            "** Reason for termination = ", P, ":", P, "~n",
+            "** Callback modules = ", P, "~n",
+            "** Callback mode = ", P, "~n",
+            case Q of
+               [_, _ | _] -> "** Queued = " ++ P ++ "~n";
+               _ -> ""
+            end,
+            case Postponed of
+               [] -> "";
+               _ -> "** Postponed = " ++ P ++ "~n"
+            end,
+            case FixedStacktrace of
+               [] -> "";
+               _ -> "** Stacktrace =~n**  " ++ P ++ "~n"
+            end,
+            case Timeouts of
+               {0, _} -> "";
+               _ -> "** Time-outs: " ++ P ++ "~n"
+            end,
+            case Log of
+               [] -> "";
+               _ -> "** Log =~n**  " ++ P ++ "~n"
+            end]),
+   Args0 =
+      [Name |
+         case Q of
+            [] -> [];
+            [Event | _] -> [Event]
+         end] ++
+      [FmtData,
+         Class, FixedReason,
+         Module,
+         CBMode] ++
+      case Q of
+         [_ | [_ | _] = Events] -> [Events];
+         _ -> []
+      end ++
+      case Postponed of
+         [] -> [];
+         _ -> [Postponed]
+      end ++
+      case FixedStacktrace of
+         [] -> [];
+         _ -> [FixedStacktrace]
+      end ++
+      case Timeouts of
+         {0, _} -> [];
+         _ -> [Timeouts]
+      end ++
+      case Log of
+         [] -> [];
+         _ -> [Log]
+      end,
+   Args =
+      case Depth of
+         unlimited ->
+            Args0;
+         _ ->
+            lists:flatmap(fun(A) -> [A, Depth] end, Args0)
+      end,
+   {Format ++ ClientFmt, Args ++ ClientArgs};
 format_log_multi(
    #{
       label := {gen_ipc, terminate},

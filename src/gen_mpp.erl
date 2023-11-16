@@ -214,7 +214,7 @@ init_it(Starter, self, ServerRef, Module, Args, Options) ->
 init_it(Starter, Parent, ServerRef, Module, Args, Options) ->
    Name = gen:name(ServerRef),
    Debug = gen:debug_options(Name, Options),
-   GbhOpts = #gbhOpts{daemon = lists:member(daemon, Options)},
+   GbhOpts = #gbhOpts{daemon = not lists:member(notDaemon, Options)},
    HibernateAfterTimeout = gen:hibernate_after(Options),
 
    case doModuleInit(Module, Args) of
@@ -271,7 +271,7 @@ enter_loop(Module, State, Opts, ServerName, Actions) ->
    Name = gen:get_proc_name(ServerName),
    Parent = gen:get_parent(),
    Debug = gen:debug_options(Name, Opts),
-   GbhOpts = #gbhOpts{daemon = lists:member(daemon, Opts)},
+   GbhOpts = #gbhOpts{daemon = not lists:member(notDaemon, Opts)},
    HibernateAfterTimeout = gen:hibernate_after(Opts),
    loopEntry(Parent, Name, Module, GbhOpts, HibernateAfterTimeout, Debug, #{}, State, listify(Actions)).
 
@@ -1205,9 +1205,20 @@ limit_report(#{label := {gen_mpp, terminate},
       reason => io_lib:limit_term(Reason, Depth),
       client_info => limit_client_report(Client, Depth)
    };
-limit_report(#{label := {gen_mpp, no_handle_info},
-   message := Msg} = Report, Depth) ->
-   Report#{message => io_lib:limit_term(Msg, Depth)}.
+limit_report(#{label := {gen_mpp, inner_error},
+   last_message := Msg,
+   state := State,
+   log := Log,
+   reason := Reason,
+   client_info := Client} = Report,
+   Depth) ->
+   Report#{
+      last_message => io_lib:limit_term(Msg, Depth),
+      state => io_lib:limit_term(State, Depth),
+      log => [io_lib:limit_term(L, Depth) || L <- Log],
+      reason => io_lib:limit_term(Reason, Depth),
+      client_info => limit_client_report(Client, Depth)
+   }.
 
 limit_client_report({From, {Name, Stacktrace}}, Depth) ->
    {From, {Name, io_lib:limit_term(Stacktrace, Depth)}};
@@ -1253,23 +1264,29 @@ format_log_single(#{label := {gen_mpp, terminate},
          _ ->
             [Name, Depth, fix_reason(Reason), Depth, Msg, Depth, State, Depth]
       end,
-   {Format1 ++ ServerLogFormat ++ ClientLogFormat,
-         Args1 ++ ServerLogArgs ++ ClientLogArgs};
-format_log_single(#{label := {gen_mpp, no_handle_info},
-   module := Module,
-   message := Msg},
+   {Format1 ++ ServerLogFormat ++ ClientLogFormat, Args1 ++ ServerLogArgs ++ ClientLogArgs};
+format_log_single(#{label := {gen_mpp, inner_error},
+   name := Name,
+   last_message := Msg,
+   state := State,
+   log := Log,
+   reason := Reason,
+   client_info := Client},
    #{single_line := true, depth := Depth} = FormatOpts) ->
    P = p(FormatOpts),
-   Format = lists:append(["Undefined handle_info in ", P,
-      ". Unhandled message: ", P, "."]),
-   Args =
+   Format1 = lists:append(["Generic server ", P, " terminating. Reason: ", P,
+      ". Last message: ", P, ". State: ", P, "."]),
+   {ServerLogFormat, ServerLogArgs} = format_server_log_single(Log, FormatOpts),
+   {ClientLogFormat, ClientLogArgs} = format_client_log_single(Client, FormatOpts),
+
+   Args1 =
       case Depth of
          unlimited ->
-            [Module, Msg];
+            [Name, fix_reason(Reason), Msg, State];
          _ ->
-            [Module, Depth, Msg, Depth]
+            [Name, Depth, fix_reason(Reason), Depth, Msg, Depth, State, Depth]
       end,
-   {Format, Args};
+   {Format1 ++ ServerLogFormat ++ ClientLogFormat, Args1 ++ ServerLogArgs ++ ClientLogArgs};
 format_log_single(Report, FormatOpts) ->
    format_log_multi(Report, FormatOpts).
 
@@ -1286,7 +1303,7 @@ format_log_multi(#{label := {gen_mpp, terminate},
    P = p(FormatOpts),
    Format =
       lists:append(
-         ["** Generic server ", P, " terminating \n"
+         ["** gen_mpp ", P, " terminating \n"
          "** Last message in was ", P, "~n"
          "** When Server state == ", P, "~n"
          "** Reason for termination ==~n** ", P, "~n"] ++
@@ -1308,20 +1325,39 @@ format_log_multi(#{label := {gen_mpp, terminate},
                end ++ ClientArgs
       end,
    {Format, Args};
-format_log_multi(#{label := {gen_mpp, no_handle_info},
-   module := Module,
-   message := Msg},
+format_log_multi(#{label := {gen_mpp, inner_error},
+   name := Name,
+   last_message := Msg,
+   state := State,
+   log := Log,
+   reason := Reason,
+   client_info := Client},
    #{depth := Depth} = FormatOpts) ->
+   Reason1 = fix_reason(Reason),
+   {ClientFmt, ClientArgs} = format_client_log(Client, FormatOpts),
    P = p(FormatOpts),
    Format =
-      "** Undefined handle_info in ~p~n"
-      "** Unhandled message: " ++ P ++ "~n",
+      lists:append(
+         ["** gen_mpp ", P, " inner_error \n"
+         "** Last message in was ", P, "~n"
+         "** When Server state == ", P, "~n"
+         "** Reason for termination ==~n** ", P, "~n"] ++
+         case Log of
+            [] -> [];
+            _ -> ["** Log ==~n** [" |
+               lists:join(",~n    ", lists:duplicate(length(Log), P))] ++
+            ["]~n"]
+         end) ++ ClientFmt,
    Args =
       case Depth of
          unlimited ->
-            [Module, Msg];
+            [Name, Msg, State, Reason1] ++ Log ++ ClientArgs;
          _ ->
-            [Module, Msg, Depth]
+            [Name, Depth, Msg, Depth, State, Depth, Reason1, Depth] ++
+               case Log of
+                  [] -> [];
+                  _ -> lists:flatmap(fun(L) -> [L, Depth] end, Log)
+               end ++ ClientArgs
       end,
    {Format, Args}.
 

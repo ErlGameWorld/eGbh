@@ -932,7 +932,7 @@ format_log(Report) ->
 
 limit_report(Report, unlimited) ->
    Report;
-limit_report(#{label := {gen_event, terminate},
+limit_report(#{label := {gen_emm, epm_terminate},
    last_message := LastIn,
    state := State,
    reason := Reason} = Report,
@@ -941,9 +941,7 @@ limit_report(#{label := {gen_event, terminate},
       last_message => io_lib:limit_term(LastIn, Depth),
       state => io_lib:limit_term(State, Depth),
       reason => io_lib:limit_term(Reason, Depth)
-   };
-limit_report(#{label := {gen_event, no_handle_info}, message := Msg} = Report, Depth) ->
-   Report#{message => io_lib:limit_term(Msg, Depth)}.
+   }.
 
 %% format_log/2 is the report callback for any Logger handler, except
 %% error_logger.
@@ -965,7 +963,7 @@ format_log(Report, FormatOpts0) ->
    {Format, Args} = format_log_single(Report, FormatOpts),
    io_lib:format(Format, Args, IoOpts).
 
-format_log_single(#{label := {gen_event, terminate},
+format_log_single(#{label := {gen_emm, epm_terminate},
    handler := Handler,
    name := SName,
    last_message := LastIn,
@@ -985,25 +983,9 @@ format_log_single(#{label := {gen_event, terminate},
             [Handler, Depth, SName, Depth, Reason1, Depth,
                LastIn, Depth, State, Depth]
       end,
-   {Format1, Args1};
-format_log_single(#{label := {gen_event, no_handle_info},
-   module := Mod,
-   message := Msg},
-   #{single_line := true, depth := Depth} = FormatOpts) ->
-   P = p(FormatOpts),
-   Format = lists:append(["Undefined handle_info in ", P, ". Unhandled message: ", P, "."]),
-   Args =
-      case Depth of
-         unlimited ->
-            [Mod, Msg];
-         _ ->
-            [Mod, Depth, Msg, Depth]
-      end,
-   {Format, Args};
-format_log_single(Report, FormatOpts) ->
-   format_log_multi(Report, FormatOpts).
+   {Format1, Args1}.
 
-format_log_multi(#{label := {gen_event, terminate},
+format_log_multi(#{label := {gen_emm, epm_terminate},
    handler := Handler,
    name := SName,
    last_message := LastIn,
@@ -1013,7 +995,7 @@ format_log_multi(#{label := {gen_event, terminate},
    Reason1 = fix_reason(Reason),
    P = p(FormatOpts),
    Format =
-      lists:append(["** gen_event handler ", P, " crashed.\n",
+      lists:append(["** gen_emm handler ", P, " crashed.\n",
          "** Was installed in ", P, "\n",
          "** Last event was: ", P, "\n",
          "** When handler state == ", P, "\n",
@@ -1024,22 +1006,6 @@ format_log_multi(#{label := {gen_event, terminate},
             [Handler, SName, LastIn, State, Reason1];
          _ ->
             [Handler, Depth, SName, Depth, LastIn, Depth, State, Depth, Reason1, Depth]
-      end,
-   {Format, Args};
-format_log_multi(#{label := {gen_event, no_handle_info},
-   module := Mod,
-   message := Msg},
-   #{depth := Depth} = FormatOpts) ->
-   P = p(FormatOpts),
-   Format =
-      "** Undefined handle_info in ~p\n"
-      "** Unhandled message: " ++ P ++ "\n",
-   Args =
-      case Depth of
-         unlimited ->
-            [Mod, Msg];
-         _ ->
-            [Mod, Msg, Depth]
       end,
    {Format, Args}.
 
