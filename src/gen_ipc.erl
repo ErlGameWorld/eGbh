@@ -1126,7 +1126,15 @@ doDelEpm(EpmHers, EpmHandler, Args) ->
 epmTerminate(#epmHer{epmM = EpmM, epmS = State} = EpmHer, Args, LastIn, Reason) ->
    case erlang:function_exported(EpmM, terminate, 2) of
       true ->
-         Res = (catch EpmM:terminate(Args, State)),
+         Res = try EpmM:terminate(Args, State)
+               catch
+                  throw:Thrown ->
+                     Thrown;
+                  exit:ExitReason ->
+                     {'EXIT', ExitReason};
+                  error:ErrorReason:Stacktrace ->
+                     {'EXIT', {ErrorReason, Stacktrace}}
+               end,
          reportTerminate(EpmHer, Reason, Args, LastIn, Res),
          Res;
       false ->

@@ -1549,7 +1549,15 @@ format_status(Opt, Module, PDict, State) ->
       end,
    case erlang:function_exported(Module, format_status, 2) of
       true ->
-         case catch Module:formatStatus(Opt, [PDict, State]) of
+         case try Module:formatStatus(Opt, [PDict, State])
+              catch
+                 throw:Thrown ->
+                    Thrown;
+                 exit:ExitReason ->
+                    {'EXIT', ExitReason};
+                 error:ErrorReason:Stacktrace ->
+                    {'EXIT', {ErrorReason, Stacktrace}}
+              end of
             {'EXIT', _} -> DefStatus;
             Else -> Else
          end;

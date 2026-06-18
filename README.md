@@ -19,7 +19,7 @@
     erlang中存在application, supervisor, gen_server, gen_event, gen_fsm, gen_statem各种行为, 学习otp也都会学习这些行为， 实际项目中也经常会用这些行为，
     其中gen_server, gen_event, gen_fsm, gen_statem这些worker类型的行为gen_server用的最多。 从大的方面看很多这些worker类型的行为都属于c/s模型，但是就单从服务进程来看
     响应请求和返回请求只是服务进程对外提供的服务接口，而处理请求才是核心，而服务进程处理各种请求和其他事物可以看做是图灵机， 而gen_statem就是一个完备的图灵机模型，
-    基于这样的分析，gen_server, gen_event, gen_fasm可以看做是gen_statem的子集，是简化了的gen_statem, 所以我觉得基于gen_statem把gen_statem, gen_server, gen_event, gen_fsm
+    基于这样的分析，gen_server, gen_event, gen_fsm可以看做是gen_statem的子集，是简化了的gen_statem, 所以我觉得基于gen_statem把gen_statem, gen_server, gen_event, gen_fsm
     封装成一个统一又通用的行为是可行的--这就得到了gen_ipc行为模块。然而实际工作中会有不一样的场景和需求，而之前gen_server, gen_event, gen_statem就是应用于这些不同的场景和需求，那么在gen_ipc
     中需要兼容这些场景和需求，所以gen_ipc封装的接口函数以及内部封装就提供了这些兼容。如果你想应用gen_server功能， 就可以只用相应的功能， 而且可以做到像gen_server那样快速响应，而不用额外处理像gen_statem
     中各种事件，定时器，各种actions以及状态的中间处理。总结起来就是gen_ipc不仅仅可以单独作为gen_server, gen_event, gen_statem使用， 同时保证了单独使用时的快速响应，还可以作为这些行为的融合使用。
@@ -40,6 +40,9 @@
 
 # gen_mpp
     功能与gen_apu一致 只是 不自带定时器相关封装
+
+# gen_asm 
+    就是gen_fsm 不过是为了换个名字消除编译警告
 
     
     
